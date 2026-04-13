@@ -5,7 +5,13 @@
 # --- Heavy Workspaces & Dependencies ---
 # These are the main culprits for the 2GB error
 IsaacLab/
-vae_container/
+vae_container/*
+!vae_container/Dockerfile
+!vae_container/Dockerfile.*
+!vae_container/*.py
+!vae_container/*.sh
+!vae_container/docker/
+!vae_container/docker/*.sh
 environment/quadcopter_vel_control/outputs/
 environment/QuadcopterVae/
 warehouse_detection_dataset/

@@ -1,0 +1,1 @@
+docker exec -it vae_container_live bash

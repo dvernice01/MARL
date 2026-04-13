@@ -1,0 +1,60 @@
+# Usiamo una versione di Python stabile e "slim" per occupare meno spazio
+#FROM python:3.10-slim
+# Use a base image that already has CUDA 12.1 installed
+FROM nvidia/cuda:12.1.0-base-ubuntu22.04
+
+# Install Python and basic tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip \
+    python3-dev \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+
+# Installiamo le dipendenze di sistema necessarie per matplotlib e pandas
+# (libtk è utile se vuoi mostrare grafici a video, anche se in Docker solitamente si salvano in file)
+# RUN apt-get update && apt-get install -y --no-install-recommends \
+#     build-essential \
+#     python3-tk \
+#     && rm -rf /var/lib/apt/lists/*
+
+# Installiamo le versioni specifiche per garantire compatibilità totale
+# Usiamo pandas per gestire comodamente i file .csvd
+   
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    "numpy<2.0.0" \
+    "pandas==2.2.0" \
+    "matplotlib==3.8.2" \
+    "opencv-python-headless" \
+    "scipy" \
+    "pillow" \
+    "kaggle" \
+    "tensorboard" 
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    torch torchvision --index-url https://download.pytorch.org/whl/cu121 
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    kagglehub \
+    kagglesdk
+
+RUN pip uninstall -y kagglehub kagglesdk && \
+    pip install kagglehub
+# Copia il tuo script di analisi e il file .csv (se li hai nella stessa cartella)
+# COPY . /app
+
+# Comando di default (puoi cambiarlo con il nome del tuo script)
+CMD ["python"]
+
+# Evita che Python generi file .pyc e assicura che l'output sia visibile subito
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Imposta la cartella di lavoro nel container
+WORKDIR /root/vae_environment
