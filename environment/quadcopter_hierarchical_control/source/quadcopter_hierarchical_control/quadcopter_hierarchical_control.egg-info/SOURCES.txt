@@ -1,0 +1,10 @@
+pyproject.toml
+setup.py
+quadcopter_hierarchical_control/__init__.py
+quadcopter_hierarchical_control/ui_extension_example.py
+quadcopter_hierarchical_control.egg-info/PKG-INFO
+quadcopter_hierarchical_control.egg-info/SOURCES.txt
+quadcopter_hierarchical_control.egg-info/dependency_links.txt
+quadcopter_hierarchical_control.egg-info/not-zip-safe
+quadcopter_hierarchical_control.egg-info/requires.txt
+quadcopter_hierarchical_control.egg-info/top_level.txt

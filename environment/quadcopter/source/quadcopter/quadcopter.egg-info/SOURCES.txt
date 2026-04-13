@@ -1,0 +1,10 @@
+pyproject.toml
+setup.py
+quadcopter/__init__.py
+quadcopter/ui_extension_example.py
+quadcopter.egg-info/PKG-INFO
+quadcopter.egg-info/SOURCES.txt
+quadcopter.egg-info/dependency_links.txt
+quadcopter.egg-info/not-zip-safe
+quadcopter.egg-info/requires.txt
+quadcopter.egg-info/top_level.txt

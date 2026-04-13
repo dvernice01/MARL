@@ -1,0 +1,10 @@
+pyproject.toml
+setup.py
+quadcopter_vel_control/__init__.py
+quadcopter_vel_control/ui_extension_example.py
+quadcopter_vel_control.egg-info/PKG-INFO
+quadcopter_vel_control.egg-info/SOURCES.txt
+quadcopter_vel_control.egg-info/dependency_links.txt
+quadcopter_vel_control.egg-info/not-zip-safe
+quadcopter_vel_control.egg-info/requires.txt
+quadcopter_vel_control.egg-info/top_level.txt

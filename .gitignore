@@ -1,0 +1,54 @@
+# ==========================================
+# MARL Project GitIgnore
+# ==========================================
+
+# --- Heavy Workspaces & Dependencies ---
+# These are the main culprits for the 2GB error
+IsaacLab/
+vae_container/
+environment/quadcopter_vel_control/outputs/
+environment/QuadcopterVae/
+warehouse_detection_dataset/
+
+# --- Simulation & Video (Isaac Lab / Isaac Sim) ---
+_isaac_sim/
+_ext/
+*.webm
+*.mp4
+
+# --- Machine Learning & Training Bloat ---
+# Blocks all weights, data, and TensorBoard logs
+*.pt
+*.pth
+*.npy
+*.bin
+Vae/checkpoints/
+Vae/runs/
+Vae/debug_epochs/
+wandb/
+**/logs/
+**/outputs/
+
+# --- Python & System ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+.DS_Store
+.vscode/
+.obsidian/
+
+# --- ROS 2 ---
+build/
+install/
+log/
+
+# --- Datasets & Images ---
+*-ubyte
+*-ubyte.gz
+*.png
+*.jpg
+*.jpeg
+*.csv
