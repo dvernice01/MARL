@@ -57,7 +57,6 @@ class QuadcopterHierarchicalControlEnvCfg(DirectRLEnvCfg):
     state_space = 0
     debug_vis = True
 
-    #low_level_network_path: str = "/workspace/environment/low_level_policy/VEL-01-DRY/26-02-09_17-08-14-875658_PPO/checkpoints/best_agent.pt"
     max_velocity: float = 1.0
     max_yaw_rate: float = 1.0
     
