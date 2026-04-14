@@ -4,8 +4,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-#from torchvision import datasets
-#from torchvision.transforms import ToTensor, Lambda
 import kagglehub
 import matplotlib.pyplot as plt
 from VAE import VAE
@@ -14,49 +12,8 @@ from torch.utils.tensorboard import SummaryWriter
 from CollisionMap import depth_to_collision_image
 import cv2
 from scipy.ndimage import grey_dilation
-import trimesh as tm   # pip install trimesh
+import trimesh as tm 
 from tqdm import tqdm
-
-# def diagnose_training(model, dataset, device, epoch):
-#     """
-#     Prints key statistics to identify exactly what is wrong.
-#     """
-#     model.eval()
-#     with torch.no_grad():
-#         # get 3 different samples
-#         idx_list = [0, len(dataset)//3, 2*len(dataset)//3]
-        
-#         print(f"\n{'='*60}")
-#         print(f"DIAGNOSIS — Epoch {epoch}")
-#         print(f"{'='*60}")
-        
-#         recons = []
-#         for idx in idx_list:
-#             depth_input, collision, valid_mask = dataset[idx]
-#             depth_batch = depth_input.unsqueeze(0).to(device)
-            
-#             recon, mean, logvar, z = model(depth_batch)
-            
-#             recons.append(recon.cpu())
-            
-#             print(f"\nSample {idx}:")
-#             print(f"  input   → min:{depth_input.min():.4f}  max:{depth_input.max():.4f}  mean:{depth_input.mean():.4f}")
-#             print(f"  target  → min:{collision.min():.4f}  max:{collision.max():.4f}  mean:{collision.mean():.4f}")
-#             print(f"  mask    → valid pixels: {valid_mask.mean():.1%}")
-#             print(f"  recon   → min:{recon.min():.4f}  max:{recon.max():.4f}  mean:{recon.mean():.4f}")
-#             print(f"  z mean  → min:{mean.min():.4f}  max:{mean.max():.4f}  std:{mean.std():.4f}")
-#             print(f"  logvar  → min:{logvar.min():.4f}  max:{logvar.max():.4f}  mean:{logvar.mean():.4f}")
-        
-#         # KEY CHECK: are the reconstructions identical across samples?
-#         diff_01 = (recons[0] - recons[1]).abs().mean().item()
-#         diff_02 = (recons[0] - recons[2]).abs().mean().item()
-#         print(f"\n  Reconstruction difference sample 0 vs 1 : {diff_01:.6f}")
-#         print(f"  Reconstruction difference sample 0 vs 2 : {diff_02:.6f}")
-#         if diff_01 < 0.001 and diff_02 < 0.001:
-#             print("  *** POSTERIOR COLLAPSE CONFIRMED: all reconstructions identical ***")
-#         else:
-#             print("  OK: reconstructions differ across samples")
-#         print(f"{'='*60}\n")
 
 def visualize_dce_debug(model, dataset, device, num_samples=3, save_path='debug_visualization.png'):
     """
@@ -120,7 +77,7 @@ def visualize_dce_debug(model, dataset, device, num_samples=3, save_path='debug_
     print(f"Saved debug visualization to: {save_path}")
 
 
-def visualize_training_progress(model, dataset, device, epoch, save_dir='debug_epochs_collision'):
+def visualize_training_progress(model, dataset, device, epoch, save_dir='debug_epochs'):
     """
     Call this at the end of each epoch to track how reconstruction improves.
     Saves one file per epoch so you can compare them side by side.
@@ -128,7 +85,7 @@ def visualize_training_progress(model, dataset, device, epoch, save_dir='debug_e
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f'epoch_{epoch:03d}.png')
     visualize_dce_debug(model, dataset, device, num_samples=3, save_path=save_path)
-    
+
 # ── EXACT AUTHOR PARAMETERS ───────────────────────────────────────────────────
 CX = 240.0
 CY = 135.0
@@ -136,8 +93,8 @@ FX = 252.91646
 FY = 252.91646
 MAX_DEPTH      = 10.0
 MIN_DEPTH      = 0.2
-ROBOT_EDGE_LEN = 0.4    # cube side = 2r, so r = 0.2m
-OFFSET_DIST    = 0.2    # robot radius for D_offset
+ROBOT_EDGE_LEN = 0.2    # cube side = 2r, so r = 0.1m
+OFFSET_DIST    = 0.1    # robot radius for D_offset
 
 
 # ── EXACT AUTHOR: meshgrid creation ───────────────────────────────────────────
@@ -348,44 +305,11 @@ def depth_to_collision_image(depth_raw: np.ndarray,
 # create meshgrid ONCE outside the loop — expensive to recompute per image
 MESHGRID = create_meshgrid(270, 480, CX, CY, FX, FY)
 
-# ── PREPROCESSING: convert and save the full dataset ─────────────────────────
-
-def preprocess_split(depth_dir: str, output_dir: str, split_name: str):
-    """
-    Reads all .npy depth files in depth_dir,
-    converts each to a collision image,
-    saves the result in output_dir with the same filename.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-
-    files = sorted([f for f in os.listdir(depth_dir) if f.endswith('.npy')])
-    print(f"\n[{split_name}] Converting {len(files)} depth maps → collision images")
-    print(f"  Input  : {depth_dir}")
-    print(f"  Output : {output_dir}")
-
-    skipped = 0
-    for fname in tqdm(files, desc=split_name):
-        out_path = os.path.join(output_dir, fname)
-
-        # skip if already converted (allows resuming interrupted runs)
-        if os.path.exists(out_path):
-            continue
-
-        depth_raw = np.load(os.path.join(depth_dir, fname))
-
-        # handle (H, W, 1) shape
-        if depth_raw.ndim == 3:
-            depth_raw = depth_raw[:, :, 0]
-
-        collision = depth_to_collision_image(depth_raw)
-        np.save(out_path, collision)
-
-    print(f"  Done. Skipped {skipped} already-converted files.")
 
 # ── 2. DATASET ─────────────────────────────────────────────────────────────────
 
 def _prepare_sample(depth_raw: np.ndarray,
-                    target_size=(270,480)) -> tuple[torch.Tensor, torch.Tensor]:
+                    target_size=(120, 212)) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Returns:
         depth_input    : normalized raw depth tensor (1, H, W)  — VAE input x
@@ -400,40 +324,24 @@ def _prepare_sample(depth_raw: np.ndarray,
     invalid = (depth_raw <= 0) | (~np.isfinite(depth_raw))
     depth_input = np.clip(depth_raw, 0, 10.0) / 10.0
     depth_input[invalid] = 0.0
-    #depth_input_t = torch.from_numpy(depth_input).float().unsqueeze(0)
+    depth_input_t = torch.from_numpy(depth_input).float().unsqueeze(0)
+
+    # --- target: collision image with invalid mask ---
+    collision = depth_to_collision_image(depth_raw)
+    valid_mask = (collision >= 0).astype(np.float32)      # 1=valid, 0=invalid
+    #collision = np.clip(collision, 0, 1)                   # remove -1 sentinel
+    collision_t  = torch.from_numpy(collision).float().unsqueeze(0)
+    valid_mask_t = torch.from_numpy(valid_mask).float().unsqueeze(0)
 
     # --- resize all three to VAE input resolution ---
-    # depth_input_t = F.interpolate(depth_input_t.unsqueeze(0),
-    #                               size=target_size, mode='bilinear',
-    #                               align_corners=False).squeeze(0)
-    depth_input_t = cv2.resize(
-        depth_input, 
-        dsize=(target_size[1], target_size[0]),  # OpenCV wants (W, H)
-        interpolation=cv2.INTER_LINEAR # This is the same as mode='bilinear'
-    )
-    # --- target: collision image with invalid mask ---
-    collision = depth_to_collision_image(depth_input_t)
-    valid_mask = (collision >= 0).astype(np.float32)      # 1=valid, 0=invalid
-    collision = np.clip(collision, 0, 1)                   # remove -1 sentinel
-    # collision_t  = torch.from_numpy(collision).float().unsqueeze(0)
-    # valid_mask_t = torch.from_numpy(valid_mask).float().unsqueeze(0)
-
+    depth_input_t = F.interpolate(depth_input_t.unsqueeze(0),
+                                  size=target_size, mode='bilinear',
+                                  align_corners=False).squeeze(0)
     # collision_t   = F.interpolate(collision_t.unsqueeze(0),
     #                               size=target_size, mode='bilinear',
     #                               align_corners=False).squeeze(0)
-    # valid_mask_t  = F.interpolate(valid_mask_t.unsqueeze(0),
-    #                               size=target_size, mode='nearest').squeeze(0)
-
-    collision_t = cv2.resize(
-        collision, 
-        dsize=(target_size[1], target_size[0]),  # OpenCV wants (W, H)
-        interpolation=cv2.INTER_LINEAR # This is the same as mode='bilinear'
-    )
-    valid_mask_t = cv2.resize(
-        valid_mask, 
-        dsize=(target_size[1], target_size[0]),  # OpenCV wants (W, H)
-        interpolation=cv2.INTER_LINEAR # This is the same as mode='bilinear'
-    )
+    valid_mask_t  = F.interpolate(valid_mask_t.unsqueeze(0),
+                                  size=target_size, mode='nearest').squeeze(0)
 
     return depth_input_t, collision_t, valid_mask_t
 
@@ -444,20 +352,27 @@ def train_one_epoch(epoch_index, tb_writer):
     last_loss = 0.
 
     for i, data in enumerate(train_loader):
+        # Unpack the 3 items from your WarehouseDepthDataset
         inputs, labels, masks = data
+        
+        # Move to GPU
         inputs, labels, masks = inputs.to(device), labels.to(device), masks.to(device)
 
         optimizer.zero_grad()
+
+        # 1. Forward pass - Unpack the VAE tuple
         recon, mean, logvar, z = model(inputs)
 
-        # print details for first batch of each epoch
-        verbose = (i == 0)
-        loss = dce_loss(recon, labels, masks, mean, logvar, verbose=verbose)
-
+        # 2. Compute the specialized DCE loss
+        loss = dce_loss(recon, labels, masks, mean, logvar)
+        
+        # 3. Backward pass
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item()
+        
+        # Reporting every 10 batches (1000 is too high for smaller datasets)
         if i % 10 == 9:
             last_loss = running_loss / 10
             print(f'  batch {i + 1} loss: {last_loss:.6f}')
@@ -468,7 +383,7 @@ def train_one_epoch(epoch_index, tb_writer):
     return last_loss
 
 class WarehouseDepthDataset(Dataset):
-    def __init__(self, depth_dir, augment=False, target_size=(270,480)):
+    def __init__(self, depth_dir, augment=False, target_size=(120, 212)):
         self.depth_dir   = depth_dir
         self.augment     = augment
         self.target_size = target_size
@@ -479,7 +394,7 @@ class WarehouseDepthDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        depth_raw = np.load(os.path.join(self.depth_dir, self.files[idx]))
+        depth_raw = np.load(os.path.join(self.depth_dir, self.files[idx])).astype(np.float32)
         depth_input, collision, valid_mask = _prepare_sample(depth_raw, self.target_size)
 
         # data augmentation: random horizontal flip (train only)
@@ -496,16 +411,6 @@ class WarehouseDepthDataset(Dataset):
 
         return depth_input, collision, valid_mask
 
-
-# ── 3. DATALOADERS ─────────────────────────────────────────────────────────────
-
-# Download latest version of the dataset
-# path = kagglehub.dataset_download("machowe/warehouse-object-detection-dataset")
-# print("Path to dataset files:", path)
-
-# # Define the base path provided by kagglehub
-# base_path = '/root/.cache/kagglehub/datasets/machowe/warehouse-object-detection-dataset/versions/1'
-# Update the dataset initializations (Note: 'images' instead of 'depth')
 target_res = (270, 480)
 train_data = WarehouseDepthDataset(os.path.join('warehouse_detection_dataset/raw/train/depth/'), augment = False, target_size = target_res)
 val_data   = WarehouseDepthDataset(os.path.join('warehouse_detection_dataset/raw/val/depth/'),augment = False, target_size = target_res)
@@ -516,12 +421,10 @@ test_data  = WarehouseDepthDataset(os.path.join('warehouse_detection_dataset/raw
 train_loader = DataLoader(train_data, batch_size=32, shuffle=True,  num_workers=2)
 val_loader   = DataLoader(val_data,   batch_size=32, shuffle=False, num_workers=2)
 test_loader  = DataLoader(test_data,  batch_size=32, shuffle=False, num_workers=2)
-
 # ── 4. MODEL ───────────────────────────────────────────────────────────────────
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
-
 # with_logits=False: decoder output goes through sigmoid → values in [0,1]
 # This is correct because xcoll is a continuous normalized image, not logits
 model = VAE(input_dim=1, latent_dim=64, with_logits=False, inference_mode=False).to(device)
@@ -529,38 +432,47 @@ optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
 # ── 5. LOSS FUNCTION — exactly as described in the paper ──────────────────────
 
-beta_norm = 0.001 
+beta_norm = 3.0   # from paper Section IV-C
 
-def dce_loss(recon, target, valid_mask, mean, logvar,
-             beta=beta_norm, verbose=False):
+def dce_loss(recon: torch.Tensor,
+             target: torch.Tensor,
+             valid_mask: torch.Tensor,
+             mean: torch.Tensor,
+             logvar: torch.Tensor,
+             beta: float = beta_norm) -> torch.Tensor:
+    """
+    Paper equation (1): L = Lrecon + beta_norm * LKL
 
-    squared_error = (recon - target) ** 2
-    masked_error  = squared_error * valid_mask
-    n_valid       = valid_mask.sum().clamp(min=1)
-    recon_loss    = masked_error.sum() / n_valid
+    Lrecon = MSE(xcoll, xcoll_recon)   — only over VALID pixels
+    LKL    = -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
 
+    valid_mask: 1 where pixel is valid, 0 where it is an invalid depth pixel.
+    The paper explicitly states invalid pixels are removed from the loss.
+    """
+    # --- reconstruction loss: MSE over valid pixels only ---
+    squared_error = (recon - target) ** 2          # (B, 1, H, W)
+    masked_error  = squared_error * valid_mask     # zero out invalid pixels
+    n_valid       = valid_mask.sum().clamp(min=1)  # avoid division by zero
+    recon_loss    = masked_error.sum() / n_valid   # mean over valid pixels
+
+    # --- KL divergence loss ---
+    # paper formula: -0.5 * sum_j(1 + log(sigma^2_j) - mu^2_j - sigma^2_j)
     kl_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp())
+    # normalize by batch size for stability
     kl_loss = kl_loss / mean.shape[0]
-
-    if verbose:
-        print(f"    recon_loss: {recon_loss.item():.6f}  "
-              f"kl_loss: {kl_loss.item():.6f}  "
-              f"kl*beta: {(beta * kl_loss).item():.6f}  "
-              f"ratio kl/recon: {(kl_loss / recon_loss.clamp(min=1e-8)).item():.2f}x")
 
     return recon_loss + beta * kl_loss
 
-# visualize_dce_debug(model, train_data, device,
-#                     num_samples=3,
-#                     save_path='debug_epoch_000_pretrain.png')
-#diagnose_training(model, train_data, device, epoch=0)
+visualize_dce_debug(model, train_data, device,
+                    num_samples=3,
+                    save_path='debug_epoch_000_pretrain.png')
 
 # ──────────────────────── 6. TRAINING  ──────────────────────
 # Initializing in a separate cell so we can easily add more epochs to the same run
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 writer = SummaryWriter('runs/fashion_trainer_{}'.format(timestamp))
 epoch_number = 0
-EPOCHS = 500
+EPOCHS = 100
 best_vloss = 1_000_000.
 
 for epoch in range(EPOCHS):
@@ -582,7 +494,7 @@ for epoch in range(EPOCHS):
                 vinputs, vlabels, vmasks = vinputs.to(device), vlabels.to(device), vmasks.to(device)
                 
                 # Unpack here too
-                v_recon, v_mean, v_logvar, v_z = model(vlabels)
+                v_recon, v_mean, v_logvar, v_z = model(vinputs)
                 
                 # Use all arguments for loss
                 vloss = dce_loss(v_recon, vlabels, vmasks, v_mean, v_logvar)
@@ -603,8 +515,7 @@ for epoch in range(EPOCHS):
     if epoch_number % 10 == 0 or epoch_number == EPOCHS - 1:
         visualize_training_progress(model, val_data, device, epoch=epoch_number)
         print(f"  [debug] saved epoch {epoch_number} visualization")
-    if epoch_number % 10 == 0:
-        diagnose_training(model, val_data, device, epoch=epoch_number)
+
     # Track best performance, and save the model's state
     if avg_vloss < best_vloss:
         best_vloss = avg_vloss
