@@ -8,7 +8,7 @@ IsaacLab/
 vae_container/*
 !vae_container/Dockerfile
 !vae_container/Dockerfile.*
-!vae_container/*.py
+!vae_container/Vae/*.py
 !vae_container/*.sh
 !vae_container/docker/
 !vae_container/docker/*.sh
