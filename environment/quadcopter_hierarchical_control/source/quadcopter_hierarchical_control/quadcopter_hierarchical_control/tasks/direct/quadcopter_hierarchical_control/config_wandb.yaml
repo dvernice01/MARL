@@ -6,9 +6,9 @@ command:
   - --headless
 method: bayes
 metric:
-  goal: maximize
-  name: Reward/Total reward (mean)
-
+  goal: minimize
+  name: Info / Episode_Info/final_distance_to_goal
+  
 parameters:
   # Learning parameters
   learning_rate:
