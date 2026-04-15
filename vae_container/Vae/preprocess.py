@@ -63,58 +63,108 @@ def detect_edges(depth_uint8, depth_float):
             if 0.1 < depth_float[j[0], j[1]] < min_d:
                 min_d = depth_float[j[0], j[1]]
                 edges[i] = j
+        if min_d < depth_float[edge[0], edge[1]] and depth_float[edge[0], edge[1]] > 0.1:
+            edges[i] = (0,0)
     return edges, edge_image
 
-def build_D_M(edges, depth_float, robot_radius=ROBOT_EDGE_LEN/2):
+def build_D_M_from_cubes(edges, point_cloud, depth_float,
+                          edge_length=ROBOT_EDGE_LEN):
+    """
+    Replicates the author's create_cube_mesh + Warp ray casting without Warp.
+
+    The author places a cube of side `edge_length` at each edge point in 3D,
+    then renders a depth image of all cubes from the camera.
+
+    We replicate this by:
+      1. Taking every 5th edge pixel (same as author: edges[::5])
+      2. Getting its 3D position from the point_cloud
+      3. Computing how large that cube appears in the image
+         (cube side in pixels = edge_length * fx / Z)
+      4. Painting a square of that size in D_M with depth value Z
+         (this is what the ray caster would return for rays hitting the cube)
+
+    A cube projects as a square on the image plane (not a circle),
+    so we fill a square patch — no mgrid/circle needed.
+    """
     D_M = np.full((H, W), MAX_DEPTH, dtype=np.float32)
-    for edge in edges[::5]:   # sample every 5th — same as author
-        v, u = int(edge[0]), int(edge[1])
-        z    = depth_float[v, u]
-        if z < MIN_DEPTH:
+
+    # sample every 5th edge — exact replication of author's edges[::5]
+    sampled_edges = edges[::5]
+
+    for i in range(len(sampled_edges)):
+        # pixel coordinates of this edge
+        v = int(sampled_edges[i, 0])   # row
+        u = int(sampled_edges[i, 1])   # col
+
+        # 3D position of this edge pixel from the point cloud
+        # point_cloud shape: (3, H, W) → [x, y, z] at pixel (v, u)
+        X = point_cloud[0, v, u]
+        Y = point_cloud[1, v, u]
+        Z = point_cloud[2, v, u]   # this is the depth z of the edge point
+
+        # skip invalid points
+        if Z < MIN_DEPTH or not np.isfinite(Z):
             continue
-        r_px = max(1, min(int(robot_radius * FX / z), 40))
-        v0, v1 = max(0, v-r_px), min(H, v+r_px+1)
-        u0, u1 = max(0, u-r_px), min(W, u+r_px+1)
+
+        # the cube has side edge_length in meters
+        # its half-side projected onto the image plane at depth Z:
+        #   half_side_px = (edge_length / 2) * fx / Z
+        half_px_u = int((edge_length / 2.0) * FX / Z)
+        half_px_v = int((edge_length / 2.0) * FY / Z)
+
+        # clamp to reasonable size
+        half_px_u = max(1, min(half_px_u, 60))
+        half_px_v = max(1, min(half_px_v, 60))
+
+        # image bounds of the projected cube face
+        v0 = max(0, v - half_px_v)
+        v1 = min(H, v + half_px_v + 1)
+        u0 = max(0, u - half_px_u)
+        u1 = min(W, u + half_px_u + 1)
+
         if v1 <= v0 or u1 <= u0:
             continue
-        vv, uu = np.mgrid[v0:v1, u0:u1]
-        inside = (vv-v)**2 + (uu-u)**2 <= r_px**2
-        D_M[v0:v1, u0:u1][inside] = np.minimum(D_M[v0:v1, u0:u1][inside], z)
+
+        # paint the square patch with depth Z
+        # np.minimum keeps the closest cube if two overlap
+        D_M[v0:v1, u0:u1] = np.minimum(D_M[v0:v1, u0:u1], Z)
+
     return D_M
 
-def depth_to_collision_image(depth_raw):
-    # ── sanitize FIRST — kills all NaN/inf before anything else ──────────────
+def depth_to_collision_image(depth_raw: np.ndarray) -> np.ndarray:
     depth = sanitize_depth(depth_raw)
     if depth.ndim == 3:
         depth = depth[:, :, 0]
-
-    # resize to author's fixed resolution if needed
     if depth.shape != (H, W):
         depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_LINEAR)
-        depth = sanitize_depth(depth)   # sanitize again after resize
+        depth = sanitize_depth(depth)
 
-    # D_offset
+    # D_offset — equation 5
     x = MESHGRID[0] * depth
     y = MESHGRID[1] * depth
     z = MESHGRID[2] * depth
-    range_img = np.sqrt(x**2 + y**2 + z**2)
-    range_img = np.nan_to_num(range_img, nan=MAX_DEPTH)  # extra safety
-    z_offset  = np.where(range_img > 0, (1 - OFFSET_DIST / range_img) * z, 0.0)
+    range_img   = np.sqrt(x**2 + y**2 + z**2)
+    range_img   = np.nan_to_num(range_img, nan=MAX_DEPTH)
+    z_offset    = np.where(range_img > 0, (1 - OFFSET_DIST / range_img) * z, 0.0)
     norm_offset = process_image_like_author(z_offset)
 
-    # edges
+    # edge detection
     depth_uint8 = (depth / MAX_DEPTH * 255).astype(np.uint8)
     edges, _    = detect_edges(depth_uint8, depth)
     if len(edges) < 10:
         return norm_offset
 
-    # D_M
-    D_M      = build_D_M(edges, depth)
-    norm_D_M = process_image_like_author(D_M)
+    # build point cloud for cube placement
+    point_cloud = np.stack([x, y, z], axis=0)   # (3, H, W)
 
-    # combine
-    collision = np.minimum(norm_offset, norm_D_M)
-    collision = np.nan_to_num(collision, nan=0.0)   # final safety net
+    # D_M — cube mesh approximation
+    D_M_raw    = build_D_M_from_cubes(edges, point_cloud, depth,
+                                       edge_length=ROBOT_EDGE_LEN)
+    norm_D_M   = process_image_like_author(D_M_raw)
+
+    # equation 6
+    collision  = np.minimum(norm_offset, norm_D_M)
+    collision  = np.nan_to_num(collision, nan=0.0)
     return collision
 
 def preprocess_split(depth_dir, out_dir):
