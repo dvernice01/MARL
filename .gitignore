@@ -7,6 +7,7 @@
 IsaacLab/
 vae_container/Vae/checkpoint/
 vae_container/Vae/runs/
+vae_container/Vae/*.log
 vae_container/Vae/debug_epochs/
 vae_container/Vae/outputs/
 vae_container/Vae/debug_epochs_collision/

@@ -97,7 +97,7 @@ def dce_loss(recon, target, valid_mask, mean, logvar, beta=3.0):
     # catch NaN loss — skip this batch if it happens
     if torch.isnan(total):
         return torch.tensor(0.0, requires_grad=True, device=recon.device)
-    return total
+    return total, recon_loss, beta*kl_loss
 
 
 # ── VISUALIZATION ─────────────────────────────────────────────────────────────
@@ -169,31 +169,45 @@ def main():
 
             model.train()
             train_loss = 0.0
+            train_recon_loss = 0.0
+            train_kl_loss = 0.0
             for inputs, labels, masks in train_loader:
                 inputs, labels, masks = (inputs.to(device),
                                         labels.to(device),
                                         masks.to(device))
                 optimizer.zero_grad()
                 recon, mean, logvar, z = model(inputs)
-                loss = dce_loss(recon, labels, masks, mean, logvar, beta=run.config['beta'])
+                beta = run.config['beta']
+                loss, recon_loss, kl_loss = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 train_loss += loss.item()
+                train_recon_loss += recon_loss
+                train_kl_loss += kl_loss
             train_loss /= len(train_loader)
+            train_recon_loss /= len(train_loader)
+            train_kl_loss /= len(train_loader)
 
             # validate
             model.eval()
             val_loss = 0.0
+            val_recon_loss = 0.0
+            val_kl_loss = 0.0
             with torch.no_grad():
                 for vinputs, vlabels, vmasks in val_loader:
                     vinputs, vlabels, vmasks = (vinputs.to(device),
                                                 vlabels.to(device),
                                                 vmasks.to(device))
                     vrecon, vmean, vlogvar, _ = model(vinputs)
-                    val_loss += dce_loss(vrecon, vlabels, vmasks,
-                                        vmean, vlogvar, beta=run.config['beta']).item()
-            val_loss /= len(val_loader)
+                    new_loss, new_recon, new_kl = dce_loss(vrecon, vlabels, vmasks,
+                                        vmean, vlogvar, beta=beta)
+                    val_loss += new_loss  
+                    val_recon_loss += new_recon
+                    val_kl_loss += new_kl      
+                val_loss /= len(val_loader)
+                val_recon_loss /= len(val_loader)
+                val_kl_loss /= len(val_loader)
 
             print(f'  train: {train_loss:.6f}  val: {val_loss:.6f}')
             scheduler.step(val_loss)
@@ -217,6 +231,10 @@ def main():
                     "epoch": epoch,
                     "val_loss": val_loss,
                     "train_loss": train_loss,
+                    "val_recon_loss": val_recon_loss,
+                    "val_kl_loss": val_kl_loss,
+                    "train_recon_loss": train_recon_loss,
+                    "train_kl_loss": train_kl_loss,
                 }
             )
 
