@@ -61,6 +61,7 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
                 "life",
                 "died",
                 "time_out",
+                "action_reg_diff",
                 "final_distance_to_goal",
             ]
         }
@@ -193,6 +194,7 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
 
         obs = torch.cat(
             [
+                self._actions[-1],
                 self.rel_pos_b,
                 self._robot.data.root_lin_vel_b,
                 self._robot.data.root_ang_vel_b,
@@ -218,7 +220,14 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
         relative_distance_to_bounds_y = torch.abs((origins[:, 1]) - self._robot.data.root_pos_w[: ,1])
         self.distance_to_bounds_x = (square_side / 2) - relative_distance_to_bounds_x
         self.distance_to_bounds_y = (square_side / 2) - relative_distance_to_bounds_y
-
+        # 3. Action Regularization
+        # Separate thrust (action[0]) and moments (action[1:])
+        last_action = self._actions[-1]  # Last action (shape: [num_actions])
+        penultimate_action = self._actions[-2]  # Penultimate action (shape: [num_actions])
+        action_diff = last_action - penultimate_action
+        # Compute the squared L2 norm (or regularize) of the difference
+        action_reg_diff = torch.norm(action_diff, p=2) 
+        action_reg_diff = 1 - torch.tanh(action_reg_diff / 0.8)
         is_alive = torch.logical_and(self.distance_to_bounds_x >= 0.0, self.distance_to_bounds_y >= 0.0)
         life = torch.where(is_alive, 
                         self.cfg.alive_reward_scale, 
@@ -228,6 +237,7 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "action_reg_diff": action_reg_diff * self.cfg.rew_scale_action_reg * self.step_dt,
             "life": life * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)

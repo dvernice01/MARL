@@ -53,7 +53,7 @@ class QuadcopterHierarchicalControlEnvCfg(DirectRLEnvCfg):
     decimation= 10
     decimation_low_level = 2
     action_space = 4
-    observation_space = 11
+    observation_space = 15
     state_space = 0
     debug_vis = True
 
@@ -102,5 +102,6 @@ class QuadcopterHierarchicalControlEnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = 0.05
     ang_vel_reward_scale = 0.01
     distance_to_goal_reward_scale = 15.0
+    rew_scale_action_reg = 0.0
     alive_reward_scale = 0.1
     death_reward_scale = -5.0
