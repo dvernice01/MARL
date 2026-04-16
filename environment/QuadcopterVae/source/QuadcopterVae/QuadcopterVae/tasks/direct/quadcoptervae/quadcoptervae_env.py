@@ -25,8 +25,9 @@ import isaaclab.utils.math as math_utils
 from .quadcoptervae_env_cfg import QuadcoptervaeEnvCfg
 from isaaclab_assets import CRAZYFLIE_CFG  
 from isaaclab.markers import CUBOID_MARKER_CFG  
-from isaaclab.sensors import Camera
-
+from isaaclab.sensors import Camera, CameraCfg
+from isaaclab.utils.math import transform_points, unproject_depth, quat_inv, quat_apply
+import matplotlib.pyplot as plt
 
 import wandb
 
@@ -143,18 +144,116 @@ class QuadcoptervaeEnv(DirectRLEnv):
         # Camera sensor setup
         self.camera = Camera(self.cfg.camera)
         self.scene.sensors["camera"] = self.camera
+        # clone and replicate
+        self.scene.clone_environments(copy_from_source=False)
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
-        # clone and replicate
-        self.scene.clone_environments(copy_from_source=False)
         # we need to explicitly filter collisions for CPU simulation
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+    def _get_depth_data(self) -> dict:
+        """
+        Returns a dict with the raw depth tensor and optional pointcloud.
+
+        Depth tensor shape : (num_envs, H, W, 1)  dtype: torch.float32
+        Values represent distance in METERS along the camera Z-axis.
+        Invalid / out-of-range pixels are filled with torch.inf or 0.0
+        depending on the clipping_range setting.
+        """
+        # ------------------------------------------------------------------
+        # RAW DEPTH IMAGE
+        # shape: (num_envs, H, W, 1), float32, unit: meters
+        # "distance_to_image_plane" = z-axis depth (standard pinhole model)
+        # "distance_to_camera"      = euclidean ray distance
+        # ------------------------------------------------------------------
+
+        depth: torch.Tensor = self.camera.data.output["distance_to_camera"]
+
+        # ------------------------------------------------------------------
+        # CLEAN invalid values (inf / nan → max_range, useful before feeding to NN)
+        # ------------------------------------------------------------------
+        max_range = self.cfg.camera.spawn.clipping_range[1]
+        depth_clean = torch.nan_to_num(depth, nan=max_range, posinf=max_range)
+
+
+        # ------------------------------------------------------------------
+        # 2. CAMERA INTRINSICS & POSE (world frame)
+        #    intrinsic_matrices : (num_envs, 3, 3)
+        #    pos_w              : (num_envs, 3)   camera origin in world
+        #    quat_w_world       : (num_envs, 4)   camera orientation in world
+        #                         quaternion convention: (w, x, y, z)
+        # ------------------------------------------------------------------
+        K   = self.camera.data.intrinsic_matrices   # (N, 3, 3)
+        cam_pos_w  = self.camera.data.pos_w         # (N, 3)
+        cam_quat_w = self.camera.data.quat_w_world  # (N, 4)  w-first
+
+        # ------------------------------------------------------------------
+        # # EXAMPLE REDUCTIONS (pick what your policy needs)
+        # # ------------------------------------------------------------------
+
+        # # (a) Scalar: mean depth per env — cheapest, no CNN needed
+        # mean_depth = depth_clean.mean(dim=(1, 2, 3))          # (num_envs,)
+
+        # # (b) Scalar: minimum depth per env — closest obstacle distance
+        # min_depth = depth_clean.min(dim=2).values             # intermediate
+        # min_depth = min_depth.min(dim=1).values.squeeze(-1)   # (num_envs,)
+
+        # # (c) Flat vector: downsample to 8x8 patch for lightweight NN input
+        # # shape → (num_envs, 64)
+        # depth_patch = torch.nn.functional.interpolate(
+        #     depth_clean.squeeze(-1).unsqueeze(1),  # (N, 1, H, W)
+        #     size=(8, 8),
+        #     mode="bilinear",
+        #     align_corners=False,
+        # ).squeeze(1).reshape(self.num_envs, -1)               # (num_envs, 64)
+
+        # # (d) Full image for CNN policy — keep as (num_envs, 1, H, W)
+        # depth_for_cnn = depth_clean.squeeze(-1).unsqueeze(1)  # (N, 1, H, W)
+
+        # ------------------------------------------------------------------
+        # OPTIONAL: Back-project to 3D pointcloud in world frame
+        # Useful for obstacle avoidance reward shaping
+        # ------------------------------------------------------------------
+        # shape: (num_envs, H*W, 3) in camera frame
+        points_cam = unproject_depth(
+            depth_clean,                          # (N, H, W, 1)
+            self.camera.data.intrinsic_matrices,  # (N, 3, 3)
+        )
+        # transform to world frame using camera pose
+        points_world = transform_points(
+            points_cam,
+            self.camera.data.pos_w,   # (N, 3) camera position in world
+            self.camera.data.quat_w_world,  # (N, 4) camera orientation
+        )  # shape: (N, H*W, 3)
+
+        body_pos_w  = self._robot.data.root_pos_w    # (N, 3)
+        body_quat_w = self._robot.data.root_quat_w   # (N, 4)
+
+        # Translate points so the body origin is at zero
+        points_centered = points_world - body_pos_w.unsqueeze(1)  # (N, H*W, 3)
+
+        # Rotate from world frame into body frame using inverse body quaternion
+        body_quat_inv = quat_inv(body_quat_w)                     # (N, 4)
+
+        # quat_apply broadcasts over the point dimension
+        # expand quat to match (N, H*W, 4) for batched rotation
+        body_quat_inv_exp = body_quat_inv.unsqueeze(1).expand(-1, points_centered.shape[1], -1)
+        points_body = quat_apply(body_quat_inv_exp, points_centered)  # (N, H*W, 3)
+
+        # ------------------------------------------------------------------
+        # 7. CAMERA ORIGIN in BODY FRAME
+        #    Same transform applied to the single camera position vector
+        # ------------------------------------------------------------------
+        cam_centered = (cam_pos_w - body_pos_w)                   # (N, 3)
+        cam_pos_body = quat_apply(body_quat_inv, cam_centered)    # (N, 3)
+
+        return points_body, cam_pos_body
 
     def _pre_physics_step(self, actions: torch.Tensor):
         
@@ -195,6 +294,26 @@ class QuadcoptervaeEnv(DirectRLEnv):
                 self._desired_pos_w
             )
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
+
+        if self.common_step_counter % 300 == 0:
+                    
+            depth_data_b, _ = self._get_depth_data()
+
+            if torch.is_tensor(depth_data_b):
+                # .detach() removes from graph, .cpu() moves to RAM
+                depth_np = depth_data_b.detach().cpu().numpy()
+            else:
+                depth_np = depth_data_b
+
+            # 2. Squeeze if it has extra dimensions like (1, H, W) or (B, H, W)
+            depth_np = depth_np.squeeze()
+
+            # 3. Save as a colormapped image
+            plt.imshow(depth_np, cmap='plasma') # 'plasma' or 'magma' are great for depth
+            plt.colorbar(label='Distance (m)')
+            plt.title('Depth Data Visualization')
+            plt.savefig('depth_check.png')
+            plt.close()
 
         obs = torch.cat(
             [

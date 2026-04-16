@@ -82,32 +82,21 @@ class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
 
     terrain: TerrainImporterCfg = TerrainImporterCfg(
         prim_path="/World/ground",
-        num_envs=5,
-        env_spacing=4.0,
         terrain_type="usd",
         usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/full_warehouse.usd",
         collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(),
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
         debug_vis=False,
     )
 
-    # terrain = TerrainImporterCfg(
-    #     prim_path="/World/ground",
-    #     terrain_type="plane",
-    #     collision_group=-1,
-    #     physics_material=sim_utils.RigidBodyMaterialCfg(
-    #         friction_combine_mode="multiply",
-    #         restitution_combine_mode="multiply",
-    #         static_friction=1.0,
-    #         dynamic_friction=1.0,
-    #         restitution=0.0,
-    #     ),
-    #     debug_vis=False,
-    # )
-
-    # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1, env_spacing=2.5, replicate_physics=True, clone_in_fabric=True
+        num_envs=1, env_spacing=2.5, replicate_physics=False
     )
 
     # robot
@@ -117,11 +106,11 @@ class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
 
     # sensors
     camera = CameraCfg(
-        prim_path="/World/envs/env_.*/Robot/body/camera",  # 'body' is the base link of Crazyflie
+        prim_path="/World/envs/env_.*/Robot/body/front_cam",  # 'body' is the base link of Crazyflie
         update_period=0.1,
         height=84,   # keep small for RL — 480x640 will crush perf at 4096 envs
         width=84,
-        data_types=["distance_to_image_plane"],  # depth sensing
+        data_types=["distance_to_camera"],  # depth sensing
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0,
             focus_distance=400.0,
