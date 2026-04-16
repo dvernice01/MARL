@@ -28,6 +28,7 @@ from isaaclab.markers import CUBOID_MARKER_CFG
 from isaaclab.sensors import Camera, CameraCfg
 from isaaclab.utils.math import transform_points, unproject_depth, quat_inv, quat_apply
 import matplotlib.pyplot as plt
+import numpy as np
 
 import wandb
 
@@ -193,41 +194,15 @@ class QuadcoptervaeEnv(DirectRLEnv):
         cam_pos_w  = self.camera.data.pos_w         # (N, 3)
         cam_quat_w = self.camera.data.quat_w_world  # (N, 4)  w-first
 
-        # ------------------------------------------------------------------
-        # # EXAMPLE REDUCTIONS (pick what your policy needs)
-        # # ------------------------------------------------------------------
 
-        # # (a) Scalar: mean depth per env — cheapest, no CNN needed
-        # mean_depth = depth_clean.mean(dim=(1, 2, 3))          # (num_envs,)
-
-        # # (b) Scalar: minimum depth per env — closest obstacle distance
-        # min_depth = depth_clean.min(dim=2).values             # intermediate
-        # min_depth = min_depth.min(dim=1).values.squeeze(-1)   # (num_envs,)
-
-        # # (c) Flat vector: downsample to 8x8 patch for lightweight NN input
-        # # shape → (num_envs, 64)
-        # depth_patch = torch.nn.functional.interpolate(
-        #     depth_clean.squeeze(-1).unsqueeze(1),  # (N, 1, H, W)
-        #     size=(8, 8),
-        #     mode="bilinear",
-        #     align_corners=False,
-        # ).squeeze(1).reshape(self.num_envs, -1)               # (num_envs, 64)
-
-        # # (d) Full image for CNN policy — keep as (num_envs, 1, H, W)
-        # depth_for_cnn = depth_clean.squeeze(-1).unsqueeze(1)  # (N, 1, H, W)
-
-        # ------------------------------------------------------------------
-        # OPTIONAL: Back-project to 3D pointcloud in world frame
-        # Useful for obstacle avoidance reward shaping
-        # ------------------------------------------------------------------
         # shape: (num_envs, H*W, 3) in camera frame
-        points_cam = unproject_depth(
-            depth_clean,                          # (N, H, W, 1)
-            self.camera.data.intrinsic_matrices,  # (N, 3, 3)
-        )
+        # points_cam = unproject_depth(
+        #     depth_clean,                          # (N, H, W, 1)
+        #     self.camera.data.intrinsic_matrices,  # (N, 3, 3)
+        # )
         # transform to world frame using camera pose
         points_world = transform_points(
-            points_cam,
+            depth_clean,
             self.camera.data.pos_w,   # (N, 3) camera position in world
             self.camera.data.quat_w_world,  # (N, 4) camera orientation
         )  # shape: (N, H*W, 3)
@@ -236,7 +211,7 @@ class QuadcoptervaeEnv(DirectRLEnv):
         body_quat_w = self._robot.data.root_quat_w   # (N, 4)
 
         # Translate points so the body origin is at zero
-        points_centered = points_world - body_pos_w.unsqueeze(1)  # (N, H*W, 3)
+        points_centered = points_world - body_pos_w.unsqueeze(1)  
 
         # Rotate from world frame into body frame using inverse body quaternion
         body_quat_inv = quat_inv(body_quat_w)                     # (N, 4)
@@ -244,7 +219,7 @@ class QuadcoptervaeEnv(DirectRLEnv):
         # quat_apply broadcasts over the point dimension
         # expand quat to match (N, H*W, 4) for batched rotation
         body_quat_inv_exp = body_quat_inv.unsqueeze(1).expand(-1, points_centered.shape[1], -1)
-        points_body = quat_apply(body_quat_inv_exp, points_centered)  # (N, H*W, 3)
+        points_body = quat_apply(body_quat_inv_exp, points_centered) 
 
         # ------------------------------------------------------------------
         # 7. CAMERA ORIGIN in BODY FRAME
@@ -294,22 +269,17 @@ class QuadcoptervaeEnv(DirectRLEnv):
                 self._desired_pos_w
             )
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
-
         if self.common_step_counter % 300 == 0:
-                    
-            depth_data_b, _ = self._get_depth_data()
 
-            if torch.is_tensor(depth_data_b):
-                # .detach() removes from graph, .cpu() moves to RAM
-                depth_np = depth_data_b.detach().cpu().numpy()
-            else:
-                depth_np = depth_data_b
+            depth = self.camera.data.output["distance_to_camera"]  # (N, H, W, 1)
 
-            # 2. Squeeze if it has extra dimensions like (1, H, W) or (B, H, W)
-            depth_np = depth_np.squeeze()
+            depth_np = depth[0].squeeze().detach().cpu().numpy()  # (H, W)
 
-            # 3. Save as a colormapped image
-            plt.imshow(depth_np, cmap='plasma') # 'plasma' or 'magma' are great for depth
+            # Optional: clamp for better contrast
+            max_range = self.cfg.camera.spawn.clipping_range[1]
+            depth_np = np.clip(depth_np, 0, max_range)
+
+            plt.imshow(depth_np, cmap='plasma')
             plt.colorbar(label='Distance (m)')
             plt.title('Depth Data Visualization')
             plt.savefig('depth_check.png')
