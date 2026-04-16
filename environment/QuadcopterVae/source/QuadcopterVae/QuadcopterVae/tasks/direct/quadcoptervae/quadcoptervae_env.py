@@ -29,6 +29,10 @@ from isaaclab.sensors import Camera, CameraCfg
 from isaaclab.utils.math import transform_points, unproject_depth, quat_inv, quat_apply
 import matplotlib.pyplot as plt
 import numpy as np
+import os
+from .VAE import VAE
+from tqdm import tqdm
+import cv2
 
 import wandb
 
@@ -36,6 +40,341 @@ wandb.login()
 
 # Project that the run is recorded to
 project = "quadcoptervae"
+class CollisionImage:
+    def init(self):
+        self.CX = 240.0
+        self.CY = 135.0
+        self.FX = 252.91646
+        self.FY = 252.91646
+        self.MAX_DEPTH = 10.0
+        self.MIN_DEPTH = 0.2
+        self.ROBOT_EDGE_LEN = 0.2   # Crazyflie: cube side = 2r, r = 0.1m
+        self.OFFSET_DIST    = 0.1
+        self.H = 270
+        self.W = 480
+        self.MESHGRID = self.create_meshgrid(self.H, self.W, self.CX, self.CY, self.FX, self.FY)
+        
+    def sanitize_depth(self, depth):
+        depth = np.nan_to_num(depth.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        depth[depth < 0] = 0.0
+        depth[depth > self.MAX_DEPTH] = self.MAX_DEPTH
+        return depth
+
+    def create_meshgrid(H, W, cx, cy, fx, fy):
+        x = np.arange(0, H, dtype=np.float32)
+        y = np.arange(0, W, dtype=np.float32)
+        x, y = np.meshgrid(y, x)
+        z = np.ones((H, W))
+        x = (x - cx) / fx
+        y = (y - cy) / fy
+        return np.stack([x, y, z], axis=0)
+    
+    def process_image_like_author(self, image):
+        image = image.copy()
+        image[image < self.MIN_DEPTH] = -1.0
+        image[image > self.MAX_DEPTH] = self.MAX_DEPTH
+        image = image * 0.1          # scale to [0, 1]
+        image[image < 0.0] = 0.0
+        image[image > 1.0] = 1.0
+        return image
+
+    def detect_edges(self, depth_uint8, depth_float):
+        edge_image = cv2.Canny(depth_uint8, 30, 50)
+        edges_rc   = np.where(edge_image > 0)
+        edges      = np.array(list(zip(edges_rc[0], edges_rc[1])))
+        if len(edges) == 0:
+            return edges, edge_image
+        for i in range(len(edges)):
+            edge = edges[i]
+            neighbors = [
+                (max(edge[0]-1,0), edge[1]), (min(edge[0]+1,self.H-1), edge[1]),
+                (edge[0], max(0,edge[1]-1)), (edge[0], min(self.W-1,edge[1]+1)),
+                (max(edge[0]-2,0), edge[1]), (min(edge[0]+2,self.H-1), edge[1]),
+                (edge[0], max(0,edge[1]-2)), (edge[0], min(self.W-1,edge[1]+2)),
+            ]
+            min_d = depth_float[edge[0], edge[1]]
+            if min_d <= 0.0:
+                for j in neighbors:
+                    if depth_float[j[0], j[1]] > 0.0:
+                        min_d = depth_float[j[0], j[1]]
+                        edge  = j
+                        break
+            for j in neighbors:
+                if 0.1 < depth_float[j[0], j[1]] < min_d:
+                    min_d = depth_float[j[0], j[1]]
+                    edges[i] = j
+            if min_d < depth_float[edge[0], edge[1]] and depth_float[edge[0], edge[1]] > 0.1:
+                edges[i] = (0,0)
+        return edges, edge_image
+
+    def build_D_M_from_cubes(self, edges, point_cloud, depth_float,
+                            edge_length):
+        """
+        Replicates the author's create_cube_mesh + Warp ray casting without Warp.
+
+        The author places a cube of side `edge_length` at each edge point in 3D,
+        then renders a depth image of all cubes from the camera.
+
+        We replicate this by:
+        1. Taking every 5th edge pixel (same as author: edges[::5])
+        2. Getting its 3D position from the point_cloud
+        3. Computing how large that cube appears in the image
+            (cube side in pixels = edge_length * fx / Z)
+        4. Painting a square of that size in D_M with depth value Z
+            (this is what the ray caster would return for rays hitting the cube)
+
+        A cube projects as a square on the image plane (not a circle),
+        so we fill a square patch — no mgrid/circle needed.
+        """
+        D_M = np.full((self.H, self.W), self.MAX_DEPTH, dtype=np.float32)
+
+        # sample every 5th edge — exact replication of author's edges[::5]
+        sampled_edges = edges[::5]
+
+        for i in range(len(sampled_edges)):
+            # pixel coordinates of this edge
+            v = int(sampled_edges[i, 0])   # row
+            u = int(sampled_edges[i, 1])   # col
+
+            # 3D position of this edge pixel from the point cloud
+            # point_cloud shape: (3, H, W) → [x, y, z] at pixel (v, u)
+            X = point_cloud[0, v, u]
+            Y = point_cloud[1, v, u]
+            Z = point_cloud[2, v, u]   # this is the depth z of the edge point
+
+            # skip invalid points
+            if Z < self.MIN_DEPTH or not np.isfinite(Z):
+                continue
+
+            # the cube has side edge_length in meters
+            # its half-side projected onto the image plane at depth Z:
+            #   half_side_px = (edge_length / 2) * fx / Z
+            half_px_u = int((edge_length / 2.0) * self.FX / Z)
+            half_px_v = int((edge_length / 2.0) * self.FY / Z)
+
+            # clamp to reasonable size
+            half_px_u = max(1, min(half_px_u, 60))
+            half_px_v = max(1, min(half_px_v, 60))
+
+            # image bounds of the projected cube face
+            v0 = max(0, v - half_px_v)
+            v1 = min(self.H, v + half_px_v + 1)
+            u0 = max(0, u - half_px_u)
+            u1 = min(self.W, u + half_px_u + 1)
+
+            if v1 <= v0 or u1 <= u0:
+                continue
+
+            # paint the square patch with depth Z
+            # np.minimum keeps the closest cube if two overlap
+            D_M[v0:v1, u0:u1] = np.minimum(D_M[v0:v1, u0:u1], Z)
+
+        return D_M
+
+    def depth_to_collision_image(self,depth_raw: np.ndarray) -> np.ndarray:
+        depth = self.sanitize_depth(depth_raw)
+        if depth.ndim == 3:
+            depth = depth[:, :, 0]
+        if depth.shape != (self.H, self.W):
+            depth = cv2.resize(depth, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+            depth = self.sanitize_depth(depth)
+
+        # D_offset — equation 5
+        x = self.MESHGRID[0] * depth
+        y = self.MESHGRID[1] * depth
+        z = self.MESHGRID[2] * depth
+        range_img   = np.sqrt(x**2 + y**2 + z**2)
+        range_img   = np.nan_to_num(range_img, nan=self.MAX_DEPTH)
+        z_offset    = np.where(range_img > 0, (1 - self.OFFSET_DIST / range_img) * z, 0.0)
+        norm_offset = self.process_image_like_author(z_offset)
+
+        # edge detection
+        depth_uint8 = (depth / self.MAX_DEPTH * 255).astype(np.uint8)
+        edges, _    = self.detect_edges(depth_uint8, depth)
+        if len(edges) < 10:
+            return norm_offset
+
+        # build point cloud for cube placement
+        point_cloud = np.stack([x, y, z], axis=0)   # (3, H, W)
+
+        # D_M — cube mesh approximation
+        D_M_raw    = self.build_D_M_from_cubes(edges, point_cloud, depth,
+                                        edge_length=self.ROBOT_EDGE_LEN)
+        norm_D_M   = self.process_image_like_author(D_M_raw)
+
+        # equation 6
+        collision  = np.minimum(norm_offset, norm_D_M)
+        collision  = np.nan_to_num(collision, nan=0.0)
+        return collision
+
+
+    class vae_config:
+        use_vae = True
+        latent_dims = 64
+        model_file = (
+            "/workspace/vae_container/Vae/checkpoint/vae_best_20260416_110853.pt"
+        )
+        model_folder = "/workspace/vae_container/Vae/checkpoint"
+        image_res = (270, 480)
+        interpolation_mode = "nearest"
+        return_sampled_latent = True
+
+
+    def clean_state_dict(state_dict):
+        clean_dict = {}
+        for key, value in state_dict.items():
+            if "module." in key:
+                key = key.replace("module.", "")
+            if "dronet." in key:
+                key = key.replace("dronet.", "encoder.")
+            clean_dict[key] = value
+        return clean_dict
+
+
+class VAEImageEncoder:
+    """
+    Class that wraps around the VAE class for efficient inference for the aerial_gym class
+    """
+
+    def __init__(self, config, device="cuda:0"):
+        self.config = config
+        self.collision_image = CollisionImage()
+        self.vae_model = VAE(input_dim=1, latent_dim=self.config.latent_dims).to(device)
+        # combine module path with model file name
+        weight_file_path = self.config.model_file
+        # load model weights
+        print("Loading weights from file: ", weight_file_path)
+        state_dict = self.collision_image.clean_state_dict(torch.load(weight_file_path))
+        self.vae_model.load_state_dict(state_dict)
+        self.vae_model.eval()
+        self.max_depth = 10.0
+
+    def encode(self, image_tensors):
+        """
+        Class to encode the set of images to a latent space. We can return both the means and sampled latent space variables.
+        """
+        with torch.no_grad():
+            # need to squeeze 0th dimension and unsqueeze 1st dimension to make it work with the VAE
+            #image_tensors = image_tensors.squeeze(0).unsqueeze(1)
+            if image_tensors.ndim == 4:  # (N, 1, H, W)
+                pass
+            elif image_tensors.ndim == 3:  # (N, H, W)
+                image_tensors = image_tensors.unsqueeze(1)
+            else:
+                raise ValueError(f"Unexpected shape: {image_tensors.shape}")
+                        
+            x_res, y_res = image_tensors.shape[-2], image_tensors.shape[-1]
+            if self.config.image_res != (x_res, y_res):
+                interpolated_image = torch.nn.functional.interpolate(
+                    image_tensors,
+                    self.config.image_res,
+                    mode=self.config.interpolation_mode,
+                )
+            else:
+                interpolated_image = image_tensors
+            z_sampled, means, *_ = self.vae_model.encode(interpolated_image)
+        if self.config.return_sampled_latent:
+            returned_val = z_sampled
+        else:
+            returned_val = means
+        return returned_val
+
+    def decode(self, latent_spaces):
+        """
+        Decode a latent space to reconstruct full images
+        """
+        with torch.no_grad():
+            if latent_spaces.shape[-1] != self.config.latent_dims:
+                print(
+                    f"ERROR: Latent space size of {latent_spaces.shape[-1]} does not match network size {self.config.latent_dims}"
+                )
+            decoded_image = self.vae_model.decode(latent_spaces)
+        return decoded_image
+
+    def get_latent_dims_size(self):
+        """
+        Function to get latent space dims
+        """
+        return self.config.latent_dims
+    
+    def _preprocess_depth(self, depth: torch.Tensor) -> torch.Tensor:
+        depth = torch.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+        depth = torch.clamp(depth, 0, self.max_depth)
+        depth = depth / self.max_depth
+        return depth
+    
+    def _get_depth_data_in_body_frame(self, max_depth) -> dict:
+        """
+        Returns a dict with the raw depth tensor and optional pointcloud.
+
+        Depth tensor shape : (num_envs, H, W, 1)  dtype: torch.float32
+        Values represent distance in METERS along the camera Z-axis.
+        Invalid / out-of-range pixels are filled with torch.inf or 0.0
+        depending on the clipping_range setting.
+        """
+        # ------------------------------------------------------------------
+        # RAW DEPTH IMAGE
+        # shape: (num_envs, H, W, 1), float32, unit: meters
+        # "distance_to_image_plane" = z-axis depth (standard pinhole model)
+        # "distance_to_camera"      = euclidean ray distance
+        # ------------------------------------------------------------------
+
+        depth: torch.Tensor = self.camera.data.output["distance_to_camera"]
+
+        # ------------------------------------------------------------------
+        # CLEAN invalid values (inf / nan → max_range, useful before feeding to NN)
+        # ------------------------------------------------------------------
+        max_range = self.cfg.camera.spawn.clipping_range[1]
+        depth= torch.nan_to_num(depth, nan=max_range, posinf=max_range, neginf=max_range)
+        depth = torch.clamp(depth, 0, max_depth)
+        depth_clean = depth / max_depth
+
+        # ------------------------------------------------------------------
+        # 2. CAMERA INTRINSICS & POSE (world frame)
+        #    intrinsic_matrices : (num_envs, 3, 3)
+        #    pos_w              : (num_envs, 3)   camera origin in world
+        #    quat_w_world       : (num_envs, 4)   camera orientation in world
+        #                         quaternion convention: (w, x, y, z)
+        # ------------------------------------------------------------------
+        K   = self.camera.data.intrinsic_matrices   # (N, 3, 3)
+        cam_pos_w  = self.camera.data.pos_w         # (N, 3)
+        cam_quat_w = self.camera.data.quat_w_world  # (N, 4)  w-first
+
+
+        # shape: (num_envs, H*W, 3) in camera frame
+        # points_cam = unproject_depth(
+        #     depth_clean,                          # (N, H, W, 1)
+        #     self.camera.data.intrinsic_matrices,  # (N, 3, 3)
+        # )
+        # transform to world frame using camera pose
+        points_world = transform_points(
+            depth_clean,
+            self.camera.data.pos_w,   # (N, 3) camera position in world
+            self.camera.data.quat_w_world,  # (N, 4) camera orientation
+        )  # shape: (N, H*W, 3)
+
+        body_pos_w  = self._robot.data.root_pos_w    # (N, 3)
+        body_quat_w = self._robot.data.root_quat_w   # (N, 4)
+
+        # Translate points so the body origin is at zero
+        points_centered = points_world - body_pos_w.unsqueeze(1)  
+
+        # Rotate from world frame into body frame using inverse body quaternion
+        body_quat_inv = quat_inv(body_quat_w)                     # (N, 4)
+
+        # quat_apply broadcasts over the point dimension
+        # expand quat to match (N, H*W, 4) for batched rotation
+        body_quat_inv_exp = body_quat_inv.unsqueeze(1).expand(-1, points_centered.shape[1], -1)
+        points_body = quat_apply(body_quat_inv_exp, points_centered) 
+
+        # ------------------------------------------------------------------
+        # 7. CAMERA ORIGIN in BODY FRAME
+        #    Same transform applied to the single camera position vector
+        # ------------------------------------------------------------------
+        cam_centered = (cam_pos_w - body_pos_w)                   # (N, 3)
+        cam_pos_body = quat_apply(body_quat_inv, cam_centered)    # (N, 3)
+
+        return points_body, cam_pos_body
 
 class QuadcoptervaeEnv(DirectRLEnv):
     cfg: QuadcoptervaeEnvCfg
@@ -55,6 +394,11 @@ class QuadcoptervaeEnv(DirectRLEnv):
         # Goal position
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
         self.rel_pos_b = torch.zeros(self.num_envs, 3, device=self.device)
+        
+        # Vae init
+        self.vae_encoder = VAEImageEncoder(vae_config, device=self.device)
+        self.max_depth = 10.0  
+        
         # Logging
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -158,78 +502,6 @@ class QuadcoptervaeEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-    def _get_depth_data(self) -> dict:
-        """
-        Returns a dict with the raw depth tensor and optional pointcloud.
-
-        Depth tensor shape : (num_envs, H, W, 1)  dtype: torch.float32
-        Values represent distance in METERS along the camera Z-axis.
-        Invalid / out-of-range pixels are filled with torch.inf or 0.0
-        depending on the clipping_range setting.
-        """
-        # ------------------------------------------------------------------
-        # RAW DEPTH IMAGE
-        # shape: (num_envs, H, W, 1), float32, unit: meters
-        # "distance_to_image_plane" = z-axis depth (standard pinhole model)
-        # "distance_to_camera"      = euclidean ray distance
-        # ------------------------------------------------------------------
-
-        depth: torch.Tensor = self.camera.data.output["distance_to_camera"]
-
-        # ------------------------------------------------------------------
-        # CLEAN invalid values (inf / nan → max_range, useful before feeding to NN)
-        # ------------------------------------------------------------------
-        max_range = self.cfg.camera.spawn.clipping_range[1]
-        depth_clean = torch.nan_to_num(depth, nan=max_range, posinf=max_range)
-
-
-        # ------------------------------------------------------------------
-        # 2. CAMERA INTRINSICS & POSE (world frame)
-        #    intrinsic_matrices : (num_envs, 3, 3)
-        #    pos_w              : (num_envs, 3)   camera origin in world
-        #    quat_w_world       : (num_envs, 4)   camera orientation in world
-        #                         quaternion convention: (w, x, y, z)
-        # ------------------------------------------------------------------
-        K   = self.camera.data.intrinsic_matrices   # (N, 3, 3)
-        cam_pos_w  = self.camera.data.pos_w         # (N, 3)
-        cam_quat_w = self.camera.data.quat_w_world  # (N, 4)  w-first
-
-
-        # shape: (num_envs, H*W, 3) in camera frame
-        # points_cam = unproject_depth(
-        #     depth_clean,                          # (N, H, W, 1)
-        #     self.camera.data.intrinsic_matrices,  # (N, 3, 3)
-        # )
-        # transform to world frame using camera pose
-        points_world = transform_points(
-            depth_clean,
-            self.camera.data.pos_w,   # (N, 3) camera position in world
-            self.camera.data.quat_w_world,  # (N, 4) camera orientation
-        )  # shape: (N, H*W, 3)
-
-        body_pos_w  = self._robot.data.root_pos_w    # (N, 3)
-        body_quat_w = self._robot.data.root_quat_w   # (N, 4)
-
-        # Translate points so the body origin is at zero
-        points_centered = points_world - body_pos_w.unsqueeze(1)  
-
-        # Rotate from world frame into body frame using inverse body quaternion
-        body_quat_inv = quat_inv(body_quat_w)                     # (N, 4)
-
-        # quat_apply broadcasts over the point dimension
-        # expand quat to match (N, H*W, 4) for batched rotation
-        body_quat_inv_exp = body_quat_inv.unsqueeze(1).expand(-1, points_centered.shape[1], -1)
-        points_body = quat_apply(body_quat_inv_exp, points_centered) 
-
-        # ------------------------------------------------------------------
-        # 7. CAMERA ORIGIN in BODY FRAME
-        #    Same transform applied to the single camera position vector
-        # ------------------------------------------------------------------
-        cam_centered = (cam_pos_w - body_pos_w)                   # (N, 3)
-        cam_pos_body = quat_apply(body_quat_inv, cam_centered)    # (N, 3)
-
-        return points_body, cam_pos_body
-
     def _pre_physics_step(self, actions: torch.Tensor):
         
         self._actions = actions.clone().clamp(-1.0, 1.0)
@@ -269,20 +541,50 @@ class QuadcoptervaeEnv(DirectRLEnv):
                 self._desired_pos_w
             )
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
+
+
+        depth = self.camera.data.output["distance_to_camera"]  # (N, H, W, 1)
+
+        # preprocess (VERY IMPORTANT)
+        depth = self.vae_encoder._preprocess_depth(depth)
+
+        # convert to (N, 1, H, W)
+        depth = depth.permute(0, 3, 1, 2)
+
+        # encode
+        latent = self.vae_encoder.encode(depth)  # (N, latent_dim)
+        # if self.common_step_counter % 300 == 0:
+
+        #     depth = self.camera.data.output["distance_to_camera"]  # (N, H, W, 1)
+
+        #     depth_np = depth[0].squeeze().detach().cpu().numpy()  # (H, W)
+
+        #     # Optional: clamp for better contrast
+        #     max_range = self.cfg.camera.spawn.clipping_range[1]
+        #     depth_np = np.clip(depth_np, 0, max_range)
+
+        #     plt.imshow(depth_np, cmap='plasma')
+        #     plt.colorbar(label='Distance (m)')
+        #     plt.title('Depth Data Visualization')
+        #     plt.savefig('depth_check.png')
+        #     plt.close()
         if self.common_step_counter % 300 == 0:
+            depth_np = depth[0, 0].detach().cpu().numpy()
 
-            depth = self.camera.data.output["distance_to_camera"]  # (N, H, W, 1)
-
-            depth_np = depth[0].squeeze().detach().cpu().numpy()  # (H, W)
-
-            # Optional: clamp for better contrast
-            max_range = self.cfg.camera.spawn.clipping_range[1]
-            depth_np = np.clip(depth_np, 0, max_range)
-
-            plt.imshow(depth_np, cmap='plasma')
-            plt.colorbar(label='Distance (m)')
-            plt.title('Depth Data Visualization')
+            plt.imshow(depth_np, cmap='plasma', vmin=0, vmax=1)
+            plt.colorbar(label='Normalized Depth')
+            plt.title('Depth (Normalized)')
             plt.savefig('depth_check.png')
+            plt.close()
+
+        if self.common_step_counter % 300 == 0:
+            recon = self.vae_encoder.decode(latent)
+
+            recon_np = recon[0, 0].detach().cpu().numpy()
+
+            plt.imshow(recon_np, cmap='plasma', vmin=0, vmax=1)
+            plt.title('Reconstruction')
+            plt.savefig('recon_check.png')
             plt.close()
 
         obs = torch.cat(
