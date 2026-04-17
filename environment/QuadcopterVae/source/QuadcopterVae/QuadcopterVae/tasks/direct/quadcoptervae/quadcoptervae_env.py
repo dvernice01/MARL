@@ -461,13 +461,13 @@ class QuadcoptervaeEnv(DirectRLEnv):
         self.final_distance_to_goal_b = torch.zeros(self.num_envs, device=self.device)
         # INIT PER CURRICULUM LEARNING
         self.curriculum_level = 0
-        self.arena_size = torch.ones(self.num_envs, device=self.device) * 4.0
+        self.arena_size = torch.ones(self.num_envs, device=self.device) * 30
 
         # Accumulatori per valutazione
         self.accum_deaths = 0.0
         self.accum_timeouts = 0.0
         self.accum_reward = 0.0
-        self.accum_counter = 0
+        self.accum_counter = 0.0
 
         # Reward massimo teorico per episodio (per normalizzare)
         max_theoretical_reward = self.cfg.alive_reward_scale * self.cfg.distance_to_goal_reward_scale * self.max_episode_length_s
@@ -540,8 +540,14 @@ class QuadcoptervaeEnv(DirectRLEnv):
         
         self._actions = actions.clone().clamp(-1.0, 1.0)
 
-        self.target_vel_cmd[:,:3] = self._actions[:, :3]
-        self.target_yaw_cmd = self._actions[:, 3]
+        # self.target_vel_cmd[:,:3] = self._actions[:, :3]
+        # self.target_yaw_cmd = self._actions[:, 3]
+        vel_zero = torch.zeros(self.num_envs, 4, device=self.device)
+        #vel_zero[:,3] = 0.3
+        vel_zero[:,0] = 0.6
+        self.target_vel_cmd[:,:3] = vel_zero[:,:3]
+        self.target_yaw_cmd = vel_zero[:,3]
+
 
     def _apply_action(self):
 
@@ -582,7 +588,7 @@ class QuadcoptervaeEnv(DirectRLEnv):
         # encode
         latent = self.vae_encoder.encode(collision)  # (N, latent_dim)
 
-        if self.common_step_counter % 100 == 0:
+        if self.common_step_counter % 20 == 0:
             depth_vis = depth[0, :, :, 0] / self.max_depth
             depth_np = depth_vis.detach().cpu().numpy()
             plt.imshow(depth_np, cmap='plasma', vmin=0, vmax=1)
@@ -652,7 +658,7 @@ class QuadcoptervaeEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         died = (self._robot.data.root_pos_w[:, 2] < 0.1) | \
-                (self._robot.data.root_pos_w[:, 2] > 2.0) | \
+                (self._robot.data.root_pos_w[:, 2] > 10.0) | \
                 (self.distance_to_bounds_x < 0.0) | \
                 (self.distance_to_bounds_y < 0.0)
         
@@ -694,15 +700,18 @@ class QuadcoptervaeEnv(DirectRLEnv):
 
         self._actions[env_ids] = 0.0
 
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-15.0, 15.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 5.0)
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        default_root_state[:, 2] = 1.0
+        default_root_state[:, 0] = -4.0
+        default_root_state[:, 1] = -2.0
+        default_root_state[:, 2] = 5.0
+        default_root_state[:, -1] = 90
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
