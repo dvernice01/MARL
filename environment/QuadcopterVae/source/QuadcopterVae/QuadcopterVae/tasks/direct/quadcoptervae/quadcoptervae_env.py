@@ -40,8 +40,21 @@ wandb.login()
 
 # Project that the run is recorded to
 project = "quadcoptervae"
+
+
+class vae_config:
+    use_vae = True
+    latent_dims = 64
+    model_file = (
+        "/workspace/vae_container/Vae/checkpoint/vae_best_20260416_110853.pt"
+    )
+    model_folder = "/workspace/vae_container/Vae/checkpoint"
+    image_res = (270, 480)
+    interpolation_mode = "nearest"
+    return_sampled_latent = True
+
 class CollisionImage:
-    def init(self):
+    def __init__(self):
         self.CX = 240.0
         self.CY = 135.0
         self.FX = 252.91646
@@ -54,13 +67,14 @@ class CollisionImage:
         self.W = 480
         self.MESHGRID = self.create_meshgrid(self.H, self.W, self.CX, self.CY, self.FX, self.FY)
         
+        
     def sanitize_depth(self, depth):
         depth = np.nan_to_num(depth.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         depth[depth < 0] = 0.0
         depth[depth > self.MAX_DEPTH] = self.MAX_DEPTH
         return depth
 
-    def create_meshgrid(H, W, cx, cy, fx, fy):
+    def create_meshgrid(self, H, W, cx, cy, fx, fy):
         x = np.arange(0, H, dtype=np.float32)
         y = np.arange(0, W, dtype=np.float32)
         x, y = np.meshgrid(y, x)
@@ -207,20 +221,7 @@ class CollisionImage:
         collision  = np.nan_to_num(collision, nan=0.0)
         return collision
 
-
-    class vae_config:
-        use_vae = True
-        latent_dims = 64
-        model_file = (
-            "/workspace/vae_container/Vae/checkpoint/vae_best_20260416_110853.pt"
-        )
-        model_folder = "/workspace/vae_container/Vae/checkpoint"
-        image_res = (270, 480)
-        interpolation_mode = "nearest"
-        return_sampled_latent = True
-
-
-    def clean_state_dict(state_dict):
+    def clean_state_dict(self, state_dict):
         clean_dict = {}
         for key, value in state_dict.items():
             if "module." in key:
@@ -238,13 +239,15 @@ class VAEImageEncoder:
 
     def __init__(self, config, device="cuda:0"):
         self.config = config
-        self.collision_image = CollisionImage()
-        self.vae_model = VAE(input_dim=1, latent_dim=self.config.latent_dims).to(device)
+        self.device = device
+        self.collision = CollisionImage()
+        self.collision.__init__()
+        self.vae_model = VAE(input_dim=1, latent_dim=self.config.latent_dims).to(self.device)
         # combine module path with model file name
         weight_file_path = self.config.model_file
         # load model weights
         print("Loading weights from file: ", weight_file_path)
-        state_dict = self.collision_image.clean_state_dict(torch.load(weight_file_path))
+        state_dict = self.collision.clean_state_dict(torch.load(weight_file_path))
         self.vae_model.load_state_dict(state_dict)
         self.vae_model.eval()
         self.max_depth = 10.0
@@ -262,7 +265,8 @@ class VAEImageEncoder:
                 image_tensors = image_tensors.unsqueeze(1)
             else:
                 raise ValueError(f"Unexpected shape: {image_tensors.shape}")
-                        
+
+            # c'è gia nel preprocess ma lo tengo per maggiore controllo        
             x_res, y_res = image_tensors.shape[-2], image_tensors.shape[-1]
             if self.config.image_res != (x_res, y_res):
                 interpolated_image = torch.nn.functional.interpolate(
@@ -272,6 +276,7 @@ class VAEImageEncoder:
                 )
             else:
                 interpolated_image = image_tensors
+            #interpolated_image = interpolated_image.float()
             z_sampled, means, *_ = self.vae_model.encode(interpolated_image)
         if self.config.return_sampled_latent:
             returned_val = z_sampled
@@ -303,6 +308,35 @@ class VAEImageEncoder:
         depth = depth / self.max_depth
         return depth
     
+    def preprocess(self, depth_torch: torch.Tensor) -> torch.Tensor:
+        """
+        depth_torch: (N, H, W, 1)
+        returns: (N, 1, H, W)
+        """
+
+        depth_np = depth_torch.squeeze(-1).cpu().numpy()  # (N,H,W)
+
+        collision_batch = []
+        for i in range(depth_np.shape[0]):
+            collision = self.collision.depth_to_collision_image(depth_np[i])
+            collision_batch.append(collision)
+
+        collision_np = np.stack(collision_batch, axis=0)  # (N,H,W)
+
+        collision = torch.from_numpy(collision_np).float().to(self.device)
+
+        collision = collision.unsqueeze(1)  # (N,1,H,W)
+
+        # resize if needed
+        if collision.shape[-2:] != self.config.image_res:
+            collision = torch.nn.functional.interpolate(
+                collision,
+                size=self.config.image_res,
+                mode=self.config.interpolation_mode,
+            )
+
+        return collision
+
     def _get_depth_data_in_body_frame(self, max_depth) -> dict:
         """
         Returns a dict with the raw depth tensor and optional pointcloud.
@@ -541,47 +575,30 @@ class QuadcoptervaeEnv(DirectRLEnv):
                 self._desired_pos_w
             )
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
-
-
         depth = self.camera.data.output["distance_to_camera"]  # (N, H, W, 1)
 
         # preprocess (VERY IMPORTANT)
-        depth = self.vae_encoder._preprocess_depth(depth)
-
-        # convert to (N, 1, H, W)
-        depth = depth.permute(0, 3, 1, 2)
-
+        collision = self.vae_encoder.preprocess(depth)
         # encode
-        latent = self.vae_encoder.encode(depth)  # (N, latent_dim)
-        # if self.common_step_counter % 300 == 0:
+        latent = self.vae_encoder.encode(collision)  # (N, latent_dim)
 
-        #     depth = self.camera.data.output["distance_to_camera"]  # (N, H, W, 1)
-
-        #     depth_np = depth[0].squeeze().detach().cpu().numpy()  # (H, W)
-
-        #     # Optional: clamp for better contrast
-        #     max_range = self.cfg.camera.spawn.clipping_range[1]
-        #     depth_np = np.clip(depth_np, 0, max_range)
-
-        #     plt.imshow(depth_np, cmap='plasma')
-        #     plt.colorbar(label='Distance (m)')
-        #     plt.title('Depth Data Visualization')
-        #     plt.savefig('depth_check.png')
-        #     plt.close()
-        if self.common_step_counter % 300 == 0:
-            depth_np = depth[0, 0].detach().cpu().numpy()
-
+        if self.common_step_counter % 100 == 0:
+            depth_vis = depth[0, :, :, 0] / self.max_depth
+            depth_np = depth_vis.detach().cpu().numpy()
             plt.imshow(depth_np, cmap='plasma', vmin=0, vmax=1)
-            plt.colorbar(label='Normalized Depth')
-            plt.title('Depth (Normalized)')
+            plt.colorbar(label='Depth (m)')
+            plt.title('Raw Depth')
             plt.savefig('depth_check.png')
             plt.close()
 
-        if self.common_step_counter % 300 == 0:
+            collision_np = collision[0, 0].detach().cpu().numpy()
+            plt.imshow(collision_np, cmap='plasma', vmin=0, vmax=1)
+            plt.title('Collision Image')
+            plt.savefig('collision_check.png')
+            plt.close()
+
             recon = self.vae_encoder.decode(latent)
-
             recon_np = recon[0, 0].detach().cpu().numpy()
-
             plt.imshow(recon_np, cmap='plasma', vmin=0, vmax=1)
             plt.title('Reconstruction')
             plt.savefig('recon_check.png')
