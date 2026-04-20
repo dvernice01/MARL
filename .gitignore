@@ -38,7 +38,7 @@ Vae/debug_epochs/
 wandb/
 **/logs/
 **/outputs/
-
+*.log
 # --- Python & System ---
 __pycache__/
 *.py[cod]
