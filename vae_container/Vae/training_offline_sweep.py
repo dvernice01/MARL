@@ -16,9 +16,6 @@ MAX_DEPTH = 10.0
 # config variable with hyperparameter values
 config = {"beta":0.001}
 
-
-
-
 # ── DATASET: loads precomputed pairs ──────────────────────────────────────────
 class WarehouseDepthDataset(Dataset):
     def __init__(self, depth_dir, collision_dir, augment=False,
@@ -97,7 +94,7 @@ def dce_loss(recon, target, valid_mask, mean, logvar, beta=3.0):
     # catch NaN loss — skip this batch if it happens
     if torch.isnan(total):
         return torch.tensor(0.0, requires_grad=True, device=recon.device)
-    return total, recon_loss, beta*kl_loss
+    return total, recon_loss, kl_loss
 
 
 # ── VISUALIZATION ─────────────────────────────────────────────────────────────
@@ -161,11 +158,12 @@ def main():
     timestamp  = datetime.now().strftime('%Y%m%d_%H%M%S')
     writer     = SummaryWriter(f'runs/dce_{timestamp}')
     best_vloss = float('inf')
+    epochs = 300
 
     visualize(model, val_data, device, epoch=0, save_dir='debug_epochs')
 
     with wandb.init(config=config) as run:
-        for epoch in np.arange(1, run.config['epochs']):
+        for epoch in np.arange(1, epochs + 1):
 
             model.train()
             train_loss = 0.0
@@ -177,7 +175,8 @@ def main():
                                         masks.to(device))
                 optimizer.zero_grad()
                 recon, mean, logvar, z = model(inputs)
-                beta = run.config['beta']
+                #beta = run.config['beta']  
+                beta = 10.0
                 loss, recon_loss, kl_loss = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -213,10 +212,10 @@ def main():
             scheduler.step(val_loss)
 
             writer.add_scalars('Loss', {'train': train_loss, 'val': val_loss}, epoch)
-            writer.add_scalar('Beta', run.config['beta'], epoch)
+            #writer.add_scalar('Beta', run.config['beta'], epoch)
             writer.flush()
 
-            if epoch % 10 == 0 or epoch == run.config['epochs'] - 1:
+            if epoch % 10 == 0 or epoch == epochs - 1:
                 visualize(model, val_data, device, epoch)
 
             if val_loss < best_vloss:

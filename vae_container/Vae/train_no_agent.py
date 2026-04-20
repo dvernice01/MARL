@@ -101,22 +101,68 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, mode='min', factor=0.5, patience=15, verbose=True)
 
 
-# ── LOSS ──────────────────────────────────────────────────────────────────────
-def get_beta(epoch, warmup=50, beta_max=3.0):
-    """KL annealing: ramp beta from 0 to beta_max over warmup epochs."""
-    return beta_max * min(1.0, epoch / warmup)
+# # ── LOSS ──────────────────────────────────────────────────────────────────────
+# def get_beta(epoch, warmup=50, beta_max=3.0):
+#     """KL annealing: ramp beta from 0 to beta_max over warmup epochs."""
+#     return beta_max * min(1.0, epoch / warmup)
+
+# def get_beta(epoch, warmup_start=0, warmup_end=200, beta_max=10.0, epochs=400):
+#     if epoch < warmup_end:
+#         return 0.0
+#     else:
+#         progress = (epoch - warmup_start) / (epochs - warmup_start)
+
+#         return beta_max * progress
+# # Da provare poi è il beta dinamico con "cyclical Annealing"
+# def get_beta(epoch, warmup_start=0, warmup_end=500, beta_max=10.0, cycle_length=100, n_cycles=4):
+#     if epoch < warmup_end:
+#         return 0.0
+#     else:
+#         cycle = epoch % cycle_length
+#         progress = cycle / cycle_length
+#         return min(beta_max, progress * 2)
+
+
+def build_beta_schedule(warmup_end=200, beta_max=10.0, total_epochs=400):
+    schedule = np.zeros(total_epochs)
+    
+    # Warmup phase: beta = 0
+    schedule[:warmup_end] = 0.0
+    
+    # Ramp phase: linspace from 0 → beta_max
+    ramp = np.linspace(0.0, beta_max, total_epochs - warmup_end)
+    schedule[warmup_end:] = ramp
+    
+    return schedule
 
 def dce_loss(recon, target, valid_mask, mean, logvar, beta=3.0):
     squared_error = (recon - target) ** 2
     masked_error  = squared_error * valid_mask
     n_valid       = valid_mask.sum().clamp(min=1)
     recon_loss    = masked_error.sum() / n_valid
-    kl_loss       = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp())
-    kl_loss       = kl_loss / mean.shape[0]
-    total         = recon_loss + beta * kl_loss
-    # catch NaN loss — skip this batch if it happens
+    # kl_loss       = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp())
+    # kl_loss       = kl_loss / mean.shape[0]
+    # total         = recon_loss + beta * kl_loss
+    # # catch NaN loss — skip this batch if it happens
+    # if torch.isnan(total):
+    #     return torch.tensor(0.0, requires_grad=True, device=recon.device)
+    # return total
+        # --- KL loss ---
+    # (B, latent_dim) — keep per-dimension to apply free bits
+    kl_per_dim = -0.5 * (1 + logvar - mean.pow(2) - logvar.exp())
+    
+    # free bits: don't penalize dimensions with KL < threshold
+    # prevents collapse of informative latent dimensions
+    kl_per_dim = torch.clamp(kl_per_dim, min=0.5)
+    
+    # normalize by BOTH batch size AND latent dim → same scale as recon_loss
+    kl_loss = kl_per_dim.mean()  # mean() over (B, latent_dim) does both at once
+
+    total = recon_loss + beta * kl_loss
+
     if torch.isnan(total):
         return torch.tensor(0.0, requires_grad=True, device=recon.device)
+
     return total
 
 
@@ -151,17 +197,20 @@ def visualize(model, dataset, device, epoch, save_dir='debug_epochs'):
 timestamp  = datetime.now().strftime('%Y%m%d_%H%M%S')
 writer     = SummaryWriter(f'runs/dce_{timestamp}')
 best_vloss = float('inf')
-EPOCHS     = 500
+EPOCHS     = 400
+beta_schedule = build_beta_schedule()
 
 visualize(model, val_data, device, epoch=0, save_dir='debug_epochs')
 
 for epoch in range(EPOCHS):
     #beta = get_beta(epoch)
+    #beta = beta_schedule[epoch]
     #print(f'EPOCH {epoch+1}/{EPOCHS}  beta={beta:.3f}')
-    beta = 0.0
+    beta = 1.0
     # train
     model.train()
     train_loss = 0.0
+    print("beta", beta)
     for inputs, labels, masks in train_loader:
         inputs, labels, masks = (inputs.to(device),
                                  labels.to(device),

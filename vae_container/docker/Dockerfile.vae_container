@@ -43,7 +43,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
     kagglehub \
-    kagglesdk
+    kagglesdk \
+    wandb
 
 RUN pip uninstall -y kagglehub kagglesdk && \
     pip install kagglehub
