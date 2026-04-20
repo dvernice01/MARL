@@ -46,7 +46,7 @@ class vae_config:
     use_vae = True
     latent_dims = 64
     model_file = (
-        "/workspace/vae_container/Vae/checkpoint/vae_best_20260416_110853.pt"
+        "/workspace/vae_container/Vae/checkpoint/vae_best_20260420_082658.pt"
     )
     model_folder = "/workspace/vae_container/Vae/checkpoint"
     image_res = (270, 480)
@@ -544,7 +544,7 @@ class QuadcoptervaeEnv(DirectRLEnv):
         # self.target_yaw_cmd = self._actions[:, 3]
         vel_zero = torch.zeros(self.num_envs, 4, device=self.device)
         #vel_zero[:,3] = 0.3
-        vel_zero[:,0] = 0.6
+        vel_zero[:,0] = 1.0
         self.target_vel_cmd[:,:3] = vel_zero[:,:3]
         self.target_yaw_cmd = vel_zero[:,3]
 

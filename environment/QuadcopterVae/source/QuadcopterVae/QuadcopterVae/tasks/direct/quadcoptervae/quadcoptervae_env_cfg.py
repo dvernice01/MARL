@@ -28,6 +28,7 @@ from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 # Imports for Camera
 from isaaclab.sensors import CameraCfg
+from isaaclab.sensors.ray_caster import RayCasterCfg, patterns
 import isaaclab.sim as sim_utils
 
 class QuadcoptervaeEnvWindow(BaseEnvWindow):
@@ -129,6 +130,18 @@ class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
             rot=(0.5, -0.5, 0.5, -0.5),  # forward-facing, ROS convention
             convention="ros",
         ),
+    )
+
+    ray_caster = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/base/lidar_cage",
+        update_period=1 / 60,
+        offset=RayCasterCfg.OffsetCfg(pos=(0, 0, 0.5)),
+        mesh_prim_paths=["/World/Ground"],
+        ray_alignment="yaw",
+        pattern_cfg=patterns.LidarPatternCfg(
+            channels=100, vertical_fov_range=[-90, 90], horizontal_fov_range=[-90, 90], horizontal_res=1.0
+        ),
+        #debug_vis=not args_cli.headless,
     )
 
     # reward scales
