@@ -153,7 +153,7 @@ def dce_loss(recon, target, valid_mask, mean, logvar, beta=3.0):
     
     # free bits: don't penalize dimensions with KL < threshold
     # prevents collapse of informative latent dimensions
-    kl_per_dim = torch.clamp(kl_per_dim, min=0.5)
+    #kl_per_dim = torch.clamp(kl_per_dim, min=0.5)
     
     # normalize by BOTH batch size AND latent dim → same scale as recon_loss
     kl_loss = kl_per_dim.mean()  # mean() over (B, latent_dim) does both at once
@@ -206,7 +206,7 @@ for epoch in range(EPOCHS):
     #beta = get_beta(epoch)
     #beta = beta_schedule[epoch]
     #print(f'EPOCH {epoch+1}/{EPOCHS}  beta={beta:.3f}')
-    beta = 1.0
+    beta = 5.0
     # train
     model.train()
     train_loss = 0.0

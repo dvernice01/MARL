@@ -4,8 +4,21 @@ method: random
 name: sweep
 metric:
   goal: minimize 
-  name: val_loss
+  name: val_to_minimize
+
+# parameters:
+#   beta:
+#     values: [20.0, 15.0, 10.0, 5.0]
 
 parameters:
-  beta:
-    values: [30.0, 15.0, 1.0, 0.1, 0.001]
+  latent_dim:
+    values: [32, 64, 128]
+  beta_max:
+    values: [1.0, 5.0, 10.0, 30.0]
+  # free_bits:
+  #   values: [0.1, 0.5, 1.0]
+  warmup_end:
+    values: [100, 200]
+  lr:
+    values: [1e-3, 1e-4, 1e-5]
+

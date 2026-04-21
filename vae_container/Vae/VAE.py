@@ -16,7 +16,8 @@ class ImgDecoder(nn.Module):
         self.with_logits = with_logits
         self.n_channels = input_dim
         self.dense = nn.Linear(latent_dim, 512)
-        self.dense1 = nn.Linear(512, 9 * 15 * 128)
+        self.dense1 = nn.Linear(512, 1024) # add by me
+        self.dense2 = nn.Linear(1024, 9 * 15 * 128)
         # Pytorch docs: output_padding is only used to find output shape, but does not actually add zero-padding to output
         self.deconv1 = nn.ConvTranspose2d(128, 128, kernel_size=3, stride=1, padding=1)
         self.deconv2 = nn.ConvTranspose2d(
@@ -41,6 +42,8 @@ class ImgDecoder(nn.Module):
         x = self.dense(z)
         x = torch.relu(x)
         x = self.dense1(x)
+        x = torch.relu(x) # add by me
+        x = self.dense2(x) # add by me
         x = x.view(x.size(0), 128, 9, 15)
 
         x = self.deconv1(x)
@@ -89,7 +92,11 @@ class ImgEncoder(nn.Module):
     def define_encoder(self):
         # define conv functions
         self.conv0 = nn.Conv2d(self.input_dim, 32, kernel_size=5, stride=2, padding=2)
-        self.conv0_1 = nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=2)
+
+        self.bn0      = nn.BatchNorm2d(32)   # add by me
+        self.conv0_1  = nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=2)
+        self.bn0_1    = nn.BatchNorm2d(32) # add by me
+
         nn.init.xavier_uniform_(self.conv0_1.weight, gain=nn.init.calculate_gain("linear"))
         nn.init.zeros_(self.conv0_1.bias)
 
@@ -122,9 +129,11 @@ class ImgEncoder(nn.Module):
         """
 
         # conv0
-        x0_0 = self.conv0(img)
-        x0_1 = self.conv0_1(x0_0)
-        x0_1 = self.elu(x0_1)
+        #x0_0 = self.conv0(img)
+        #x0_1 = self.conv0_1(x0_0)
+        #x0_1 = self.elu(x0_1)
+        x0_0 = self.bn0(self.conv0(img)) # add by me
+        x0_1 = self.elu(self.bn0_1(self.conv0_1(x0_0))) # add by me
 
         x1_0 = self.conv1_0(x0_1)
         x1_1 = self.conv1_1(x1_0)
@@ -206,6 +215,7 @@ class VAE(nn.Module):
         # reparametrization trick
         mean = self.mean_params(z)
         logvar = self.logvar_params(z)
+        logvar = torch.clamp(self.logvar_params(z), min=-4.0, max=4.0) # add by me
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         if self.inference_mode:

@@ -120,7 +120,7 @@ class WarehouseDepthDataset(Dataset):
 
 base       = 'warehouse_detection_dataset'
 target_res = (270, 480)   # must match VAE encoder architecture
-checkpoint = 'checkpoint/vae_best_20260420_090841.pt'
+checkpoint = 'checkpoint/vae_best_20260420_123334.pt'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
