@@ -320,7 +320,7 @@ def main():
                                     labels.to(device),
                                     masks.to(device))
             optimizer.zero_grad()
-            recon, mean, logvar, z = model(inputs)
+            recon, mean, logvar, z = model(labels)
             #beta = run.config['beta']  
             beta = beta_schedule[epoch]
             loss, recon_loss, kl_loss = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
@@ -344,7 +344,7 @@ def main():
                 vinputs, vlabels, vmasks = (vinputs.to(device),
                                             vlabels.to(device),
                                             vmasks.to(device))
-                vrecon, vmean, vlogvar, _ = model(vinputs)
+                vrecon, vmean, vlogvar, _ = model(vlabels)
                 new_loss, new_recon, new_kl = dce_loss(vrecon, vlabels, vmasks,
                                     vmean, vlogvar, beta=beta)
                 val_loss += new_loss  

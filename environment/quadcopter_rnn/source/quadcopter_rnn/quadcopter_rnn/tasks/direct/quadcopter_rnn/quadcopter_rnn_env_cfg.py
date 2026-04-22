@@ -81,7 +81,7 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
         prim_path="/World/ground",
         terrain_type="usd",
         usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/full_warehouse.usd",
-        collision_group=-1,
+        collision_group=1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -98,7 +98,9 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
     )
 
     # robot
-    robot: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot: ArticulationCfg = CRAZYFLIE_CFG.replace(
+        prim_path="/World/envs/env_.*/Robot",
+    )
     thrust_to_weight = 1.9
     moment_scale = 0.01
 
