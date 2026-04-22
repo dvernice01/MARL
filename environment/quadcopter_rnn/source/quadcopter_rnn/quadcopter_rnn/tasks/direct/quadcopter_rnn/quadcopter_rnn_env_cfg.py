@@ -19,21 +19,17 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import subtract_frame_transforms
 
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-
 ##
 # Pre-defined configs
 ##
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
-# Imports for Camera
-from isaaclab.sensors import CameraCfg,RayCasterCfg, patterns
-import isaaclab.sim as sim_utils
 
-class QuadcoptervaeEnvWindow(BaseEnvWindow):
+
+class QuadcopterEnvWindow(BaseEnvWindow):
     """Window manager for the Quadcopter environment."""
 
-    def __init__(self, env: QuadcoptervaeEnv, window_name: str = "IsaacLab"):
+    def __init__(self, env: QuadcopterRnnEnv, window_name: str = "IsaacLab"):
         """Initialize the window.
 
         Args:
@@ -51,9 +47,9 @@ class QuadcoptervaeEnvWindow(BaseEnvWindow):
 
 
 @configclass
-class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
+class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 50.0
+    episode_length_s = 20.0
     decimation= 10
     decimation_low_level = 2
     action_space = 4
@@ -61,11 +57,10 @@ class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
     state_space = 0
     debug_vis = True
 
-    #low_level_network_path: str = "/workspace/environment/low_level_policy/VEL-01-DRY/26-02-09_17-08-14-875658_PPO/checkpoints/best_agent.pt"
     max_velocity: float = 1.0
     max_yaw_rate: float = 1.0
     
-    ui_window_class_type = QuadcoptervaeEnvWindow
+    ui_window_class_type = QuadcopterEnvWindow
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -79,11 +74,9 @@ class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
             restitution=0.0,
         ),
     )
-
-    terrain: TerrainImporterCfg = TerrainImporterCfg(
+    terrain = TerrainImporterCfg(
         prim_path="/World/ground",
-        terrain_type="usd",
-        usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/full_warehouse.usd",
+        terrain_type="plane",
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -95,54 +88,20 @@ class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
 
+    # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1, env_spacing=2.5, replicate_physics=False
+        num_envs=1, env_spacing=2.5, replicate_physics=True, clone_in_fabric=True
     )
 
     # robot
-    robot: ArticulationCfg = CRAZYFLIE_CFG.replace(
-        prim_path="/World/envs/env_.*/Robot",
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(-4.0, -2.0, 5.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
-        )
-    )
+    robot: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     thrust_to_weight = 1.9
     moment_scale = 0.01
-
-    # sensors
-    camera = CameraCfg(
-        prim_path="/World/envs/env_.*/Robot/body/front_cam",  # 'body' is the base link of Crazyflie
-        update_period=0.1,
-        height=270,   # keep small for RL — 480x640 will crush perf at 4096 envs
-        width=480,
-        data_types=["distance_to_camera"],  # depth sensing
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=11.04, # per essere coerente con VAE
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
-            clipping_range=(0.1, 10.0), # lim_max = 10 m
-        ),
-        offset=CameraCfg.OffsetCfg(
-            #pos=(0.05, 0.0, 0.0),   # slightly in front of the drone body
-            pos=(0.05, 0.0, 0.0),
-            rot=(0.5, -0.5, 0.5, -0.5),  # forward-facing, ROS convention
-            convention="ros",
-        ),
-    )
-    height_scanner = RayCasterCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/base",
-        update_period=0.02,
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
-        ray_alignment="yaw",
-        pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
-        debug_vis=True,
-        mesh_prim_paths=["/World/defaultGroundPlane"],
-    )
 
     # reward scales
     lin_vel_reward_scale = 0.05
     ang_vel_reward_scale = 0.01
     distance_to_goal_reward_scale = 15.0
+    rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1
     death_reward_scale = -5.0

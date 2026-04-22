@@ -1,0 +1,10 @@
+pyproject.toml
+setup.py
+quadcopter_rnn/__init__.py
+quadcopter_rnn/ui_extension_example.py
+quadcopter_rnn.egg-info/PKG-INFO
+quadcopter_rnn.egg-info/SOURCES.txt
+quadcopter_rnn.egg-info/dependency_links.txt
+quadcopter_rnn.egg-info/not-zip-safe
+quadcopter_rnn.egg-info/requires.txt
+quadcopter_rnn.egg-info/top_level.txt

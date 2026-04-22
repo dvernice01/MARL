@@ -41,17 +41,29 @@ wandb.login()
 # Project that the run is recorded to
 project = "quadcoptervae"
 
+class PolicyNet(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(13, 256),
+            torch.nn.ELU(),
+            torch.nn.Linear(256, 256),
+            torch.nn.ELU(),
+            torch.nn.Linear(256, 4),
+        )
+    def forward(self, x):
+        return self.net(x)
 
 class vae_config:
     use_vae = True
-    latent_dims = 64
+    latent_dims = 512
     model_file = (
-        "/workspace/vae_container/Vae/checkpoint/vae_best_20260420_082658.pt"
+        "/workspace/vae_container/Vae/checkpoint/vae_best_20260421_150454.pt"
     )
     model_folder = "/workspace/vae_container/Vae/checkpoint"
     image_res = (270, 480)
     interpolation_mode = "nearest"
-    return_sampled_latent = True
+    return_sampled_latent = False
 
 class CollisionImage:
     def __init__(self):
@@ -199,7 +211,10 @@ class CollisionImage:
         z = self.MESHGRID[2] * depth
         range_img   = np.sqrt(x**2 + y**2 + z**2)
         range_img   = np.nan_to_num(range_img, nan=self.MAX_DEPTH)
-        z_offset    = np.where(range_img > 0, (1 - self.OFFSET_DIST / range_img) * z, 0.0)
+        safe_inv = np.divide(self.OFFSET_DIST, range_img, 
+                     out=np.zeros_like(range_img), 
+                     where=range_img > 0)
+        z_offset = np.where(range_img > 0, (1 - safe_inv) * z, 0.0)
         norm_offset = self.process_image_like_author(z_offset)
 
         # edge detection
@@ -241,7 +256,7 @@ class VAEImageEncoder:
         self.config = config
         self.device = device
         self.collision = CollisionImage()
-        self.collision.__init__()
+        #self.collision.__init__()
         self.vae_model = VAE(input_dim=1, latent_dim=self.config.latent_dims).to(self.device)
         # combine module path with model file name
         weight_file_path = self.config.model_file
@@ -249,6 +264,7 @@ class VAEImageEncoder:
         print("Loading weights from file: ", weight_file_path)
         state_dict = self.collision.clean_state_dict(torch.load(weight_file_path))
         self.vae_model.load_state_dict(state_dict)
+        print(state_dict.keys())
         self.vae_model.eval()
         self.max_depth = 10.0
 
@@ -278,6 +294,8 @@ class VAEImageEncoder:
                 interpolated_image = image_tensors
             #interpolated_image = interpolated_image.float()
             z_sampled, means, *_ = self.vae_model.encode(interpolated_image)
+            # print("means  min/max:", means.min().item(), means.max().item())
+            # print("z_samp min/max:", z_sampled.min().item(), z_sampled.max().item())
         if self.config.return_sampled_latent:
             returned_val = z_sampled
         else:
@@ -485,19 +503,6 @@ class QuadcoptervaeEnv(DirectRLEnv):
         self.ll_epsilon          = 1e-8 # skrl default
         self.ll_clip_threshold   = 5.0  # skrl default
 
-        class PolicyNet(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.net = torch.nn.Sequential(
-                    torch.nn.Linear(13, 256),
-                    torch.nn.ELU(),
-                    torch.nn.Linear(256, 256),
-                    torch.nn.ELU(),
-                    torch.nn.Linear(256, 4),
-                )
-            def forward(self, x):
-                return self.net(x)
-
         policy = PolicyNet()
         missing, unexpected = policy.load_state_dict(checkpoint["policy"], strict=False)
 
@@ -522,6 +527,7 @@ class QuadcoptervaeEnv(DirectRLEnv):
         self.scene.articulations["robot"] = self._robot
         # Camera sensor setup
         self.camera = Camera(self.cfg.camera)
+        #self.ray_caster = RaycasterSensorSceneCfg
         self.scene.sensors["camera"] = self.camera
         # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
@@ -585,6 +591,9 @@ class QuadcoptervaeEnv(DirectRLEnv):
 
         # preprocess (VERY IMPORTANT)
         collision = self.vae_encoder.preprocess(depth)
+        assert not torch.isnan(collision).any(), f"NaN in collision: {collision.min()}, {collision.max()}"
+        assert not torch.isinf(collision).any(), f"Inf in collision: {collision.min()}, {collision.max()}"
+    
         # encode
         latent = self.vae_encoder.encode(collision)  # (N, latent_dim)
 
@@ -609,6 +618,14 @@ class QuadcoptervaeEnv(DirectRLEnv):
             plt.title('Reconstruction')
             plt.savefig('recon_check.png')
             plt.close()
+
+            # print("latent min/max:", latent.min().item(), latent.max().item())
+            # print("recon  min/max:", recon.min().item(),  recon.max().item())
+            # print("collision min/max:", collision.min().item(), collision.max().item())
+
+        for name, param in self.vae_encoder.vae_model.named_parameters():
+            if "mu" in name or "log_var" in name or "fc" in name:
+                print(name, param.shape)
 
         obs = torch.cat(
             [
@@ -710,7 +727,7 @@ class QuadcoptervaeEnv(DirectRLEnv):
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
         default_root_state[:, 0] = -4.0
         default_root_state[:, 1] = -2.0
-        default_root_state[:, 2] = 5.0
+        default_root_state[:, 2] = 2.0
         default_root_state[:, -1] = 90
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)

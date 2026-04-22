@@ -28,7 +28,7 @@ parser.add_argument("--video", action="store_true", default=False, help="Record 
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default="Template-Hierarchical-Controller-Direct-v0", help="Name of the task.")
+parser.add_argument("--task", type=str, default="Template-Quadcopter-Rnn-Direct-v0", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=42, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint to resume training.")
@@ -67,7 +67,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_rl.skrl import SkrlVecEnvWrapper
 from isaaclab.utils.io import dump_yaml
 
-import quadcopter_hierarchical_control.tasks.direct.quadcopter_hierarchical_control  # noqa: F401
+import quadcopter_rnn.tasks.direct.quadcopter_rnn # noqa: F401
 
 
 # config shortcuts
@@ -117,8 +117,8 @@ def save_reproducibility_info(log_dir, agent, args_cli, env_cfg):
         # Agent Factory (Dynamically copy based on active agent?)
         # For now we copy the one used.
         # Env
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../source/quadcopter_hierarchical_control/quadcopter_hierarchical_control/tasks/direct/quadcopter_hierarchical_control/quadcopter_hierarchical_control_env.py")),
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../source/quadcopter_hierarchical_control/quadcopter_hierarchical_control/tasks/direct/quadcopter_hierarchical_control/quadcopter_hierarchical_control_env_cfg.py")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../source/quadcopter_rnn/quadcopter_rnn/tasks/direct/quadcopter_rnn/quadcopter_rnn_env.py")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../source/quadcopter_rnn/quadcopter_rnn/tasks/direct/quadcopter_rnn/quadcopter_rnn_env_cfg.py")),
     ]
     
     # Add Agent Config File
@@ -138,7 +138,7 @@ def main(env_cfg, agent_cfg: dict):
 
     # ── 1. Init wandb FIRST so sweep config is available ──────────────
     run = wandb.init(
-        project="quadcopter_hierarchical_control",
+        project="quadcopter_rnn",
         sync_tensorboard=True,
     )
     sweep_cfg = wandb.config  # sweep controller injects values here
@@ -164,8 +164,8 @@ def main(env_cfg, agent_cfg: dict):
 
     experiment_name = args_cli.experiment_name if args_cli.experiment_name \
         else datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_Manual_{args_cli.agent.upper()}"
-    log_dir = os.path.join("projects", "quadcopter_hierarchical_control", "logs", "skrl",
-                           "quadcopter_hierarchical_control_direct", experiment_name)
+    log_dir = os.path.join("projects", "quadcopter_rnn", "logs", "skrl",
+                           "quadcopter_rnn_direct", experiment_name)
 
     # ── 4. Create environment ──────────────────────────────────────────
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
