@@ -120,7 +120,7 @@ class WarehouseDepthDataset(Dataset):
 
 base       = 'warehouse_detection_dataset'
 target_res = (270, 480)   # must match VAE encoder architecture
-checkpoint = 'checkpoint/vae_best_20260420_123334.pt'
+checkpoint = 'checkpoint/vae_best_20260421_150454.pt'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
@@ -132,7 +132,7 @@ test_data = WarehouseDepthDataset(
 
 test_loader = DataLoader(test_data, batch_size=32, shuffle=False, num_workers=2)
 
-model = VAE(input_dim=1, latent_dim=64, with_logits=False,
+model = VAE(input_dim=1, latent_dim=512, with_logits=False,
             inference_mode=True).to(device)   # inference_mode=True → use mean, no sampling
 model.load_state_dict(torch.load(checkpoint, map_location=device))
 model.eval()
