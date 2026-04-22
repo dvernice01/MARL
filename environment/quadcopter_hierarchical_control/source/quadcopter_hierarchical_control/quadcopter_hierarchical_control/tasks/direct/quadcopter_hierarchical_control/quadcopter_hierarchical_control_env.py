@@ -154,6 +154,7 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        self._prev_actions = self._actions.clone()  
         self._actions = actions.clone().clamp(-1.0, 1.0)
         self.target_vel_cmd[:,:3] = self._actions[:, :3]
         self.target_yaw_cmd = self._actions[:, 3]
@@ -190,7 +191,6 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
                 self._desired_pos_w
             )
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
-        self._prev_actions = self._actions.clone()  
         obs = torch.cat(
             [
                 self._prev_actions,

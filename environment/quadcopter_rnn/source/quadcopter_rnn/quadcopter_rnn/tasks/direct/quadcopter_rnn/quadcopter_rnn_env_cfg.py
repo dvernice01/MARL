@@ -18,12 +18,14 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import subtract_frame_transforms
-
+from isaaclab.sensors import CameraCfg, RayCasterCfg, patterns
 ##
 # Pre-defined configs
 ##
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+
 
 
 class QuadcopterEnvWindow(BaseEnvWindow):
@@ -74,9 +76,11 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
             restitution=0.0,
         ),
     )
-    terrain = TerrainImporterCfg(
+
+    terrain: TerrainImporterCfg = TerrainImporterCfg(
         prim_path="/World/ground",
-        terrain_type="plane",
+        terrain_type="usd",
+        usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/full_warehouse.usd",
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -90,13 +94,26 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1, env_spacing=2.5, replicate_physics=True, clone_in_fabric=True
+        num_envs=1, env_spacing=2.5, replicate_physics=True
     )
 
     # robot
     robot: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     thrust_to_weight = 1.9
     moment_scale = 0.01
+
+    height_scanner = RayCasterCfg(
+        prim_path="/World/envs/env_.*/Robot/body",
+        update_period=1 / 60,
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 5.0)),
+        ray_alignment="yaw",
+        #pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
+        debug_vis=True,
+        mesh_prim_paths=["/World/ground"],
+        pattern_cfg=patterns.LidarPatternCfg(
+            channels=100, vertical_fov_range=[-90, 90], horizontal_fov_range=[-90, 90], horizontal_res=1.0
+        ),
+    )
 
     # reward scales
     lin_vel_reward_scale = 0.05

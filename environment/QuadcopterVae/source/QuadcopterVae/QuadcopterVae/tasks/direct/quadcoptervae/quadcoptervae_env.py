@@ -56,7 +56,7 @@ class PolicyNet(torch.nn.Module):
 
 class vae_config:
     use_vae = True
-    latent_dims = 512
+    latent_dims = 64
     model_file = (
         "/workspace/vae_container/Vae/checkpoint/vae_best_20260421_150454.pt"
     )
@@ -293,7 +293,10 @@ class VAEImageEncoder:
             else:
                 interpolated_image = image_tensors
             #interpolated_image = interpolated_image.float()
-            z_sampled, means, *_ = self.vae_model.encode(interpolated_image)
+            z_sampled, means, log_var = self.vae_model.encode(interpolated_image)
+            n_clipped = ((log_var < -10) | (log_var > 4)).sum().item()
+            if n_clipped > 0:
+                print(f"WARNING: {n_clipped} log_var values were clamped")
             # print("means  min/max:", means.min().item(), means.max().item())
             # print("z_samp min/max:", z_sampled.min().item(), z_sampled.max().item())
         if self.config.return_sampled_latent:
@@ -623,9 +626,9 @@ class QuadcoptervaeEnv(DirectRLEnv):
             # print("recon  min/max:", recon.min().item(),  recon.max().item())
             # print("collision min/max:", collision.min().item(), collision.max().item())
 
-        for name, param in self.vae_encoder.vae_model.named_parameters():
-            if "mu" in name or "log_var" in name or "fc" in name:
-                print(name, param.shape)
+        # for name, param in self.vae_encoder.vae_model.named_parameters():
+        #     if "mu" in name or "log_var" in name or "fc" in name:
+        #         print(name, param.shape)
 
         obs = torch.cat(
             [

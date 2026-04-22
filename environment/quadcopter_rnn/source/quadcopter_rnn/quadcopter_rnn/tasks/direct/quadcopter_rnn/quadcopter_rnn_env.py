@@ -25,13 +25,41 @@ import isaaclab.utils.math as math_utils
 from .quadcopter_rnn_env_cfg import QuadcopterRnnEnvCfg
 from isaaclab_assets import CRAZYFLIE_CFG  
 from isaaclab.markers import CUBOID_MARKER_CFG  
-
+from isaaclab.sensors import Camera, CameraCfg, RayCaster
+import matplotlib.pyplot as plt
 import wandb
 
 wandb.login()
 
 # Project that the run is recorded to
 project = "quadcopter_rnn"
+
+def hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200)):
+    """
+    ray_hits_w: (N, B, 3) tensor from RayCaster
+    grid_size: meters per cell
+    """
+    # Take XY positions only, flatten batch
+    xy = ray_hits_w[0, :, :2]  # (B, 2)
+    
+    # Filter out invalid hits (inf/nan)
+    valid = torch.isfinite(xy).all(dim=-1)
+    xy = xy[valid]
+    
+    # Convert to grid indices
+    cx, cy = map_dims[0] // 2, map_dims[1] // 2
+    ix = (xy[:, 0] / grid_size + cx).long()
+    iy = (xy[:, 1] / grid_size + cy).long()
+    
+    # Clip to map bounds
+    mask = (ix >= 0) & (ix < map_dims[0]) & (iy >= 0) & (iy < map_dims[1])
+    ix, iy = ix[mask], iy[mask]
+    
+    # Fill occupancy grid
+    occ_map = torch.zeros(map_dims, dtype=torch.float32)
+    occ_map[ix, iy] = 1.0
+    
+    return occ_map
 
 class QuadcopterRnnEnv(DirectRLEnv):
     cfg: QuadcopterRnnEnvCfg
@@ -89,7 +117,7 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self.accum_counter = 0
 
         # Reward massimo teorico per episodio (per normalizzare)
-        max_theoretical_reward = self.cfg.alive_reward_scale * self.cfg.distance_to_goal_reward_scale * self.max_episode_length_s
+        #max_theoretical_reward = self.cfg.alive_reward_scale * self.cfg.distance_to_goal_reward_scale * self.max_episode_length_s
         self.policy_network = self._load_policy_network()
         self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
 
@@ -140,12 +168,13 @@ class QuadcopterRnnEnv(DirectRLEnv):
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
+        self.ray_caster = RayCaster(self.cfg.height_scanner)
+        self.scene.sensors["raycaster"] = self.ray_caster
+        self.scene.clone_environments(copy_from_source=False)
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
-        # clone and replicate
-        self.scene.clone_environments(copy_from_source=False)
         # we need to explicitly filter collisions for CPU simulation
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
@@ -154,16 +183,7 @@ class QuadcopterRnnEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        prev_actions_physic = self._actions.clone() 
-        if self.common_step_counter % 100 == 0:
-            # .detach() removes it from the computation graph
-            # .cpu() ensures it's not on the GPU
-            # .numpy() makes it easy to format
-            actions_to_print = prev_actions_physic[0].detach().cpu().numpy()
-            
-            # Format with 3 decimal places for readability
-            formatted_actions = [f"{a:.3f}" for a in actions_to_print]
-            print(f"Step {self.common_step_counter} | Env 0 Prev Actions: {formatted_actions}")
+        self._prev_actions = self._actions.clone() 
         self._actions = actions.clone().clamp(-1.0, 1.0)
         self.target_vel_cmd[:,:3] = self._actions[:, :3]
         self.target_yaw_cmd = self._actions[:, 3]
@@ -194,22 +214,30 @@ class QuadcopterRnnEnv(DirectRLEnv):
         )
 
     def _get_observations(self) -> dict:
+
+        #ray_caster_data = self.ray_caster._data
+
+        ray_hits_w = self.ray_caster._data.ray_hits_w  # (N, B, 3)
+
+        # Generate occupancy map
+        occ_map = hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200))
+
+        # Print as image
+        plt.figure(figsize=(8, 8))
+        plt.imshow(occ_map.cpu().numpy(), cmap='gray', origin='lower')
+        plt.colorbar(label='Occupied (1) / Free (0)')
+        plt.title('Occupancy Map')
+        plt.xlabel('X cells')
+        plt.ylabel('Y cells')
+        plt.savefig('occupancy_map.png')
+        plt.close()
+
         self.rel_pos_b, _ = subtract_frame_transforms(
                 self._robot.data.root_pos_w, 
                 self._robot.data.root_quat_w, 
                 self._desired_pos_w
             )
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
-        self._prev_actions = self._actions.clone() 
-        if self.common_step_counter % 100 == 0:
-            # .detach() removes it from the computation graph
-            # .cpu() ensures it's not on the GPU
-            # .numpy() makes it easy to format
-            actions_to_print = self._prev_actions[0].detach().cpu().numpy()
-            
-            # Format with 3 decimal places for readability
-            formatted_actions = [f"{a:.3f}" for a in actions_to_print]
-            print(f"Step {self.common_step_counter} | Env 0 Prev Actions: {formatted_actions}")
         obs = torch.cat(
             [
                 #self._prev_actions,
@@ -304,22 +332,9 @@ class QuadcopterRnnEnv(DirectRLEnv):
         if len(env_ids) == self.num_envs:
             # Spread out the resets to avoid spikes in training when many environments reset at a similar time
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
-        
-        prev_actions_reset = self._actions.clone() 
-        if self.common_step_counter % 100 == 0:
-            # .detach() removes it from the computation graph
-            # .cpu() ensures it's not on the GPU
-            # .numpy() makes it easy to format
-            actions_to_print = prev_actions_reset[0].detach().cpu().numpy()
-            
-            # Format with 3 decimal places for readability
-            formatted_actions = [f"{a:.3f}" for a in actions_to_print]
-            print(f"Step {self.common_step_counter} | Env 0 Prev Actions: {formatted_actions}")
-
 
         self._prev_actions = 0.0
         self._actions[env_ids] = 0.0
-        #self._prev_actions[env_ids] = 0.0
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
@@ -332,8 +347,6 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
-
-
         
     def _set_debug_vis_impl(self, debug_vis: bool):
         pass

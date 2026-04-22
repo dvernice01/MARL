@@ -27,7 +27,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 # Imports for Camera
-from isaaclab.sensors import CameraCfg,RayCasterCfg, patterns
+from isaaclab.sensors import CameraCfg, RayCasterCfg, patterns
 import isaaclab.sim as sim_utils
 
 class QuadcoptervaeEnvWindow(BaseEnvWindow):
@@ -131,7 +131,7 @@ class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
         ),
     )
     height_scanner = RayCasterCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/base",
+        prim_path="/World/envs/env_.*/Robot/body/RayCaster",
         update_period=0.02,
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
         ray_alignment="yaw",
