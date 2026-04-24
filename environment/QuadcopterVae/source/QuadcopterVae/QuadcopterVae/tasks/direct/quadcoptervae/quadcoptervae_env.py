@@ -56,9 +56,9 @@ class PolicyNet(torch.nn.Module):
 
 class vae_config:
     use_vae = True
-    latent_dims = 64
+    latent_dims = 512
     model_file = (
-        "/workspace/vae_container/Vae/checkpoint/vae_best_20260421_150454.pt"
+        "/workspace/vae_container/Vae/checkpoint/vae_best_20260423_035418.pt"
     )
     model_folder = "/workspace/vae_container/Vae/checkpoint"
     image_res = (270, 480)
