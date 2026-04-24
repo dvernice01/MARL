@@ -286,7 +286,7 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
             # Spread out the resets to avoid spikes in training when many environments reset at a similar time
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
         
-        self._prev_actions = 0.0
+        self._prev_actions[env_ids] = 0.0
         self._actions[env_ids] = 0.0
         #self._prev_actions[env_ids] = 0.0
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)

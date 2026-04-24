@@ -262,7 +262,7 @@ def main():
 
     model = VAE(
         input_dim      = 1,
-        latent_dim     = 256,
+        latent_dim     = 512,
         with_logits    = False,
         inference_mode = False,
     ).to(device)
@@ -284,9 +284,9 @@ def main():
     for epoch in range(EPOCHS):
         #beta = get_beta(epoch)
         #beta = beta_schedule[epoch]
-        beta = float(beta_schedule[epoch])  # ← force plain float, not numpy scalar
+        #beta = float(beta_schedule[epoch])  # ← force plain float, not numpy scalar
         #print(f'EPOCH {epoch+1}/{EPOCHS}  beta={beta:.3f}')
-        #beta = 5.0
+        beta = 10.0
         # train
         model.train()
         train_loss = 0.0
