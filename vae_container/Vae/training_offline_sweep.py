@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from VAE import VAE
 import wandb
 import yaml
-
+import random
 MAX_DEPTH = 10.0
 
 
@@ -248,9 +248,10 @@ def visualize(model, dataset, device, epoch, save_dir='debug_epochs'):
     model.eval()
     fig, axes = plt.subplots(3, 3, figsize=(15, 9))
     row_titles = ['Depth input', 'Collision target', 'Reconstruction']
+    indices = random.sample(range(len(dataset)), 3)
     with torch.no_grad():
         for col in range(3):
-            idx = col * (len(dataset) // 3)
+            idx = indices[col]
             depth_t, coll_t, mask_t = dataset[idx]
             recon, *_ = model(depth_t.unsqueeze(0).to(device))
             for row, arr in enumerate([
