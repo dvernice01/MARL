@@ -28,38 +28,68 @@ from isaaclab.markers import CUBOID_MARKER_CFG
 from isaaclab.sensors import Camera, CameraCfg, RayCaster
 import matplotlib.pyplot as plt
 import wandb
+from mpl_toolkits.mplot3d import Axes3D
+
 
 wandb.login()
 
 # Project that the run is recorded to
 project = "quadcopter_rnn"
 
-def hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200)):
+def visualize_occupancy_3d(occ_map):
+    ix, iy, iz = torch.where(occ_map > 0)
+    ix = ix.detach().cpu()
+    iy = iy.detach().cpu()
+    iz = iz.detach().cpu()
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(ix.numpy(), iy.numpy(), iz.numpy(), s=1, c='red', alpha=0.3)
+    plt.show()
+    plt.savefig('occupancy_map.png')
+    plt.close()
+
+def hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200, 100), origin=None):
     """
     ray_hits_w: (N, B, 3) tensor from RayCaster
-    grid_size: meters per cell
+    grid_size: meters per voxel
+    map_dims: (X, Y, Z) voxel grid dimensions
+    origin: (3,) tensor or list, world-space origin of the grid center. Defaults to (0,0,0).
     """
-    # Take XY positions only, flatten batch
-    xy = ray_hits_w[0, :, :2]  # (B, 2)
-    
-    # Filter out invalid hits (inf/nan)
-    valid = torch.isfinite(xy).all(dim=-1)
-    xy = xy[valid]
-    
-    # Convert to grid indices
-    cx, cy = map_dims[0] // 2, map_dims[1] // 2
-    ix = (xy[:, 0] / grid_size + cx).long()
-    iy = (xy[:, 1] / grid_size + cy).long()
-    
-    # Clip to map bounds
-    mask = (ix >= 0) & (ix < map_dims[0]) & (iy >= 0) & (iy < map_dims[1])
-    ix, iy = ix[mask], iy[mask]
-    
-    # Fill occupancy grid
-    occ_map = torch.zeros(map_dims, dtype=torch.float32)
-    occ_map[ix, iy] = 1.0
-    
-    return occ_map
+    # Flatten all rays across envs: (N*B, 3)
+    pts = ray_hits_w.reshape(-1, 3)
+
+    # Filter invalid hits
+    valid = torch.isfinite(pts).all(dim=-1)
+    pts = pts[valid]
+
+    # Grid center offset
+    if origin is None:
+        origin = torch.zeros(3, device=pts.device)
+    else:
+        origin = torch.tensor(origin, device=pts.device, dtype=pts.dtype)
+
+    cx = map_dims[0] // 2
+    cy = map_dims[1] // 2
+    cz = map_dims[2] // 2
+
+    # Convert world coords to voxel indices
+    ix = ((pts[:, 0] - origin[0]) / grid_size + cx).long()
+    iy = ((pts[:, 1] - origin[1]) / grid_size + cy).long()
+    iz = ((pts[:, 2] - origin[2]) / grid_size + cz).long()
+
+    # Clip to grid bounds
+    mask = (
+        (ix >= 0) & (ix < map_dims[0]) &
+        (iy >= 0) & (iy < map_dims[1]) &
+        (iz >= 0) & (iz < map_dims[2])
+    )
+    ix, iy, iz = ix[mask], iy[mask], iz[mask]
+
+    # Fill 3D voxel grid
+    occ_map = torch.zeros(map_dims, dtype=torch.float32, device=pts.device)
+    occ_map[ix, iy, iz] = 1.0
+
+    return occ_map  # shape: (X, Y, Z)
 
 class QuadcopterRnnEnv(DirectRLEnv):
     cfg: QuadcopterRnnEnvCfg
@@ -220,17 +250,18 @@ class QuadcopterRnnEnv(DirectRLEnv):
         ray_hits_w = self.ray_caster._data.ray_hits_w  # (N, B, 3)
 
         # Generate occupancy map
-        occ_map = hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200))
+        occ_map = hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200, 100))
 
-        # Print as image
-        plt.figure(figsize=(8, 8))
-        plt.imshow(occ_map.cpu().numpy(), cmap='gray', origin='lower')
-        plt.colorbar(label='Occupied (1) / Free (0)')
-        plt.title('Occupancy Map')
-        plt.xlabel('X cells')
-        plt.ylabel('Y cells')
-        plt.savefig('occupancy_map.png')
-        plt.close()
+        # # Print as image
+        # plt.figure(figsize=(8, 8))
+        # plt.imshow(occ_map.cpu().numpy(), cmap='gray', origin='lower')
+        # plt.colorbar(label='Occupied (1) / Free (0)')
+        # plt.title('Occupancy Map')
+        # plt.xlabel('X cells')
+        # plt.ylabel('Y cells')
+        # plt.savefig('occupancy_map.png')
+        # plt.close()
+        visualize_occupancy_3d(occ_map)
 
         self.rel_pos_b, _ = subtract_frame_transforms(
                 self._robot.data.root_pos_w, 
