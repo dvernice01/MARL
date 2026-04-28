@@ -55,7 +55,7 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
     decimation= 10
     decimation_low_level = 2
     action_space = 4
-    observation_space = 11
+    observation_space = 15
     state_space = 0
     debug_vis = True
 
@@ -104,23 +104,23 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
     thrust_to_weight = 1.9
     moment_scale = 0.01
 
-    height_scanner = RayCasterCfg(
-        prim_path="/World/envs/env_.*/Robot/body",
-        update_period=1 / 60,
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 5.0)),
-        ray_alignment="yaw",
-        #pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
-        debug_vis=True,
-        mesh_prim_paths=["/World/ground"],
-        pattern_cfg=patterns.LidarPatternCfg(
-            channels=100, vertical_fov_range=[-90, 90], horizontal_fov_range=[-90, 90], horizontal_res=1.0
-        ),
-    )
+    # height_scanner = RayCasterCfg(
+    #     prim_path="/World/envs/env_.*/Robot/body",
+    #     update_period=1 / 60,
+    #     offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 5.0)),
+    #     ray_alignment="yaw",
+    #     #pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
+    #     debug_vis=True,
+    #     mesh_prim_paths=["/World/ground"],
+    #     pattern_cfg=patterns.LidarPatternCfg(
+    #         channels=100, vertical_fov_range=[-90, 90], horizontal_fov_range=[-90, 90], horizontal_res=1.0
+    #     ),
+    # )
 
     # reward scales
-    lin_vel_reward_scale = 0.05
-    ang_vel_reward_scale = 0.01
-    distance_to_goal_reward_scale = 15.0
+    lin_vel_reward_scale = 0.1
+    ang_vel_reward_scale = 0.1
+    distance_to_goal_reward_scale = 25.0
     rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1
-    death_reward_scale = -5.0
+    death_reward_scale = -2000.0

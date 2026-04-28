@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
-from VAE import VAE
+from vae_residual_batch import VAE
 import wandb
 import yaml
 import random
@@ -301,7 +301,7 @@ def main():
     timestamp  = datetime.now().strftime('%Y%m%d_%H%M%S')
     writer     = SummaryWriter(f'runs/dce_{timestamp}')
     best_vloss = float('inf')
-    epochs = 400
+    epochs = 300
     beta_schedule = build_beta_schedule(
         warmup_end=200,
         beta_max=cfg.beta_max

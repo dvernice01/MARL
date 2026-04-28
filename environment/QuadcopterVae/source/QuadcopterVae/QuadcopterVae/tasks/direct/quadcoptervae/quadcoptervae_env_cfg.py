@@ -139,9 +139,9 @@ class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
         mesh_prim_paths=["/World/defaultGroundPlane"],
     )
 
-    # reward scales
-    lin_vel_reward_scale = 0.05
-    ang_vel_reward_scale = 0.01
-    distance_to_goal_reward_scale = 15.0
+    lin_vel_reward_scale = 0.1
+    ang_vel_reward_scale = 0.1
+    distance_to_goal_reward_scale = 25.0
+    rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1
-    death_reward_scale = -5.0
+    death_reward_scale = -2000.0

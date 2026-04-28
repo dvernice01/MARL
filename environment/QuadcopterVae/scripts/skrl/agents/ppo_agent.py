@@ -103,10 +103,10 @@ def get_ppo_agent(env, device, agent_cfg=None, log_dir="logs/defaults"):
     # Read all sweep parameters with fallbacks to your defaults
     hidden_size        = get("hidden_size", 256)
     rollouts           = get("rollouts", 64)
-    learning_rate      = get("learning_rate", 5e-4)
-    learning_epochs    = get("learning_epochs", 15)
+    learning_rate      = get("learning_rate", 1e-5)
+    learning_epochs    = get("learning_epochs", 8)
     discount_factor    = get("discount_factor", 0.99)
-    entropy_loss_scale = get("entropy_loss_scale", 0.0)
+    entropy_loss_scale = get("entropy_loss_scale", 0.001)
 
     cfg = PPO_DEFAULT_CONFIG.copy()
     cfg.update(DEFAULT_PPO_CONFIG)

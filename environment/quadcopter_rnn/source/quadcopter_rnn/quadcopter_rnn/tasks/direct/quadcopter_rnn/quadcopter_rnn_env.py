@@ -198,8 +198,8 @@ class QuadcopterRnnEnv(DirectRLEnv):
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
-        self.ray_caster = RayCaster(self.cfg.height_scanner)
-        self.scene.sensors["raycaster"] = self.ray_caster
+        # self.ray_caster = RayCaster(self.cfg.height_scanner)
+        # self.scene.sensors["raycaster"] = self.ray_caster
         self.scene.clone_environments(copy_from_source=False)
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
@@ -212,11 +212,18 @@ class QuadcopterRnnEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
+    #def _pre_physics_step(self, actions: torch.Tensor):
+        # self._prev_actions = self._actions.clone() 
+        # self._actions = actions.clone().clamp(-1.0, 1.0)
+        # self.target_vel_cmd[:,:3] = self._actions[:, :3]
+        # self.target_yaw_cmd = self._actions[:, 3]
     def _pre_physics_step(self, actions: torch.Tensor):
-        self._prev_actions = self._actions.clone() 
+        self._prev_actions = self._actions.clone()
         self._actions = actions.clone().clamp(-1.0, 1.0)
-        self.target_vel_cmd[:,:3] = self._actions[:, :3]
-        self.target_yaw_cmd = self._actions[:, 3]
+
+        # ✅ use actual policy actions
+        self.target_vel_cmd[:, :3] = self._actions[:, :3] * self.cfg.max_velocity
+        self.target_yaw_cmd = self._actions[:, 3:4] * self.cfg.max_yaw_rate
 
     def _apply_action(self):
 
@@ -247,21 +254,12 @@ class QuadcopterRnnEnv(DirectRLEnv):
 
         #ray_caster_data = self.ray_caster._data
 
-        ray_hits_w = self.ray_caster._data.ray_hits_w  # (N, B, 3)
+        # ray_hits_w = self.ray_caster._data.ray_hits_w  # (N, B, 3)
 
-        # Generate occupancy map
-        occ_map = hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200, 100))
+        # # Generate occupancy map
+        # occ_map = hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200, 100))
 
-        # # Print as image
-        # plt.figure(figsize=(8, 8))
-        # plt.imshow(occ_map.cpu().numpy(), cmap='gray', origin='lower')
-        # plt.colorbar(label='Occupied (1) / Free (0)')
-        # plt.title('Occupancy Map')
-        # plt.xlabel('X cells')
-        # plt.ylabel('Y cells')
-        # plt.savefig('occupancy_map.png')
-        # plt.close()
-        visualize_occupancy_3d(occ_map)
+        #visualize_occupancy_3d(occ_map)
 
         self.rel_pos_b, _ = subtract_frame_transforms(
                 self._robot.data.root_pos_w, 
@@ -271,7 +269,7 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
         obs = torch.cat(
             [
-                #self._prev_actions,
+                self._prev_actions,
                 self.rel_pos_b,
                 self._robot.data.root_lin_vel_b,
                 self._robot.data.root_ang_vel_b,
@@ -364,7 +362,7 @@ class QuadcopterRnnEnv(DirectRLEnv):
             # Spread out the resets to avoid spikes in training when many environments reset at a similar time
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
-        self._prev_actions = 0.0
+        self._prev_actions[env_ids] = 0.0
         self._actions[env_ids] = 0.0
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]

@@ -261,8 +261,6 @@ class VAE(nn.Module):
 
         means = self.mean_params(z)
         logvars = self.logvar_params(z)
-        logvars = torch.clamp(logvars, min=-10.0, max=4.0)
-        means = torch.clamp(means, min=-10.0, max=10.0)
         std = torch.exp(0.5 * logvars)
         eps = torch.randn_like(logvars)
         if self.inference_mode:

@@ -166,7 +166,7 @@ def make_loaders(data_dir, val_ratio=0.1, batch_size=32,
 #         return min(beta_max, progress * 2)
 
 
-def build_beta_schedule(warmup_end=200, beta_max=25.0, total_epochs=400):
+def build_beta_schedule(warmup_end=200, beta_max=10.0, total_epochs=400):
     schedule = np.zeros(total_epochs)
     
     # Warmup phase: beta = 0
@@ -276,7 +276,7 @@ def main():
     timestamp  = datetime.now().strftime('%Y%m%d_%H%M%S')
     writer     = SummaryWriter(f'runs/dce_{timestamp}')
     best_vloss = float('inf')
-    EPOCHS     = 400
+    EPOCHS     = 200
     beta_schedule = build_beta_schedule()
 
     visualize(model, val_data, device, epoch=0, save_dir='debug_epochs')
@@ -286,7 +286,7 @@ def main():
         #beta = beta_schedule[epoch]
         #beta = float(beta_schedule[epoch])  # ← force plain float, not numpy scalar
         #print(f'EPOCH {epoch+1}/{EPOCHS}  beta={beta:.3f}')
-        beta = 10.0
+        beta = 0.0
         # train
         model.train()
         train_loss = 0.0

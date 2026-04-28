@@ -22,25 +22,23 @@ class HierarchicalGRUPolicy(GaussianMixin, Model):
         self.hidden_size     = hidden_size      # MLP output size
         self.hidden_size_gru = hidden_size_gru  # GRU hidden size
         self.sequence_length = sequence_length
+        pure_obs_dim = self.num_observations - self.num_actions
 
-        # MLP: obs → hidden_size
         self.net = nn.Sequential(
-            nn.Linear(self.num_observations, hidden_size),
+            nn.Linear(pure_obs_dim, hidden_size),
             nn.ELU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ELU(),
         )
 
-        # GRU: takes MLP output (hidden_size) → hidden_size_gru
         self.gru = nn.GRU(
-            input_size=hidden_size,      # MLP output feeds into GRU
-            hidden_size=hidden_size_gru, # GRU internal size
+            input_size=self.num_actions,      
+            hidden_size=hidden_size_gru, 
             num_layers=num_layers,
             batch_first=True,
         )
 
-        # Head: hidden_size_gru → actions
-        self.fc1 = nn.Linear(hidden_size_gru, 64)
+        self.fc1 = nn.Linear(hidden_size + hidden_size_gru, 64)
         self.fc2 = nn.Linear(64, 32)
         self.fc3 = nn.Linear(32, self.num_actions)
 
@@ -53,46 +51,66 @@ class HierarchicalGRUPolicy(GaussianMixin, Model):
                         "sizes": [(self.num_layers, self.num_envs, self.hidden_size_gru)]}}
 
     def compute(self, inputs, role):
-        states         = inputs["states"]
-        terminated     = inputs.get("terminated", None)
-        hidden_states  = inputs["rnn"][0]  # (num_layers, N, hidden_size_gru)
+        states        = inputs["states"]
+        terminated    = inputs.get("terminated", None)
+        hidden_states = inputs["rnn"][0]  # (num_layers, N, hidden_size_gru)
 
         if self.training:
-            rnn_input = states.view(-1, self.sequence_length, states.shape[-1])  # (N, L, obs_dim)
+            rnn_input = states.view(-1, self.sequence_length, states.shape[-1])  # (N, L, full_dim)
 
             hidden_states = hidden_states.view(
                 self.num_layers, -1, self.sequence_length, self.hidden_size_gru
             )
             hidden_states = hidden_states[:, :, 0, :].contiguous()  # (num_layers, N, hidden_size_gru)
 
-            N, L, obs_dim   = rnn_input.shape
-            features_flat   = self.net(rnn_input.view(N * L, obs_dim))  # (N*L, hidden_size)
-            features        = features_flat.view(N, L, self.hidden_size) # (N, L, hidden_size)
+            N, L, full_dim = rnn_input.shape
 
+            # split inside the sequence
+            pure_obs_seq     = rnn_input[..., :-self.num_actions]   # (N, L, obs_dim)
+            prev_actions_seq = rnn_input[..., -self.num_actions:]   # (N, L, num_actions)
+            obs_dim          = pure_obs_seq.shape[-1]
+
+            # MLP sees only pure observations — no actions
+            mlp_flat = self.net(pure_obs_seq.view(N * L, obs_dim))  # (N*L, hidden_size)
+            mlp_out  = mlp_flat.view(N, L, self.hidden_size)         # (N, L, hidden_size)
+
+            # GRU sees only previous actions — no observations
             if terminated is not None and torch.any(terminated):
-                rnn_outputs = []
-                terminated  = terminated.view(-1, self.sequence_length)
-                indexes     = (
+                rnn_outputs    = []
+                terminated_seq = terminated.view(-1, self.sequence_length)
+                indexes = (
                     [0]
-                    + (terminated[:, :-1].any(dim=0).nonzero(as_tuple=True)[0] + 1).tolist()
+                    + (terminated_seq[:, :-1].any(dim=0).nonzero(as_tuple=True)[0] + 1).tolist()
                     + [self.sequence_length]
                 )
                 for i in range(len(indexes) - 1):
                     i0, i1 = indexes[i], indexes[i + 1]
-                    rnn_output, hidden_states = self.gru(features[:, i0:i1, :], hidden_states)
-                    hidden_states[:, (terminated[:, i1 - 1]), :] = 0
-                    rnn_outputs.append(rnn_output)
-                rnn_output = torch.cat(rnn_outputs, dim=1)
+                    rnn_out, hidden_states = self.gru(prev_actions_seq[:, i0:i1, :], hidden_states)
+                    hidden_states[:, (terminated_seq[:, i1 - 1]), :] = 0
+                    rnn_outputs.append(rnn_out)
+                rnn_output = torch.cat(rnn_outputs, dim=1)           # (N, L, hidden_size_gru)
             else:
-                rnn_output, hidden_states = self.gru(features, hidden_states)
+                rnn_output, hidden_states = self.gru(prev_actions_seq, hidden_states)
+
+            # flatten sequence dim for output head
+            mlp_out    = mlp_out.reshape(N * L, self.hidden_size)
+            rnn_output = rnn_output.reshape(N * L, self.hidden_size_gru)
 
         else:
-            features              = self.net(states).unsqueeze(1)         # (N, 1, hidden_size)
-            rnn_output, hidden_states = self.gru(features, hidden_states) # (N, 1, hidden_size_gru)
+            # rollout — single step
+            pure_obs     = states[..., :-self.num_actions]   # (N, obs_dim)
+            prev_actions = states[..., -self.num_actions:]   # (N, num_actions)
 
-        rnn_output = torch.flatten(rnn_output, start_dim=0, end_dim=1)   # (N*L, hidden_size_gru)
+            mlp_out    = self.net(pure_obs)                              # (N, hidden_size)
+            rnn_output, hidden_states = self.gru(
+                prev_actions.unsqueeze(1), hidden_states
+            )                                                            # (N, 1, hidden_size_gru)
+            rnn_output = rnn_output.squeeze(1)                           # (N, hidden_size_gru)
 
-        x = F.relu(self.fc1(rnn_output))
+        # combine MLP state features + GRU action memory
+        combined = torch.cat([mlp_out, rnn_output], dim=-1)              # (N*L, hidden_size + hidden_size_gru)
+
+        x = F.relu(self.fc1(combined))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
 
@@ -102,36 +120,37 @@ class HierarchicalGRUPolicy(GaussianMixin, Model):
 class HierarchicalGRUValue(DeterministicMixin, Model):
     def __init__(self, observation_space, action_space, device, clip_actions=False,
                  num_envs=1, num_layers=1, hidden_size=256, hidden_size_gru=512, sequence_length=8):
-
         Model.__init__(self, observation_space, action_space, device)
         DeterministicMixin.__init__(self, clip_actions)
 
         self.num_envs        = num_envs
         self.num_layers      = num_layers
-        self.hidden_size     = hidden_size      # MLP output size
-        self.hidden_size_gru = hidden_size_gru  # GRU hidden size
+        self.hidden_size     = hidden_size
+        self.hidden_size_gru = hidden_size_gru
         self.sequence_length = sequence_length
 
-        # MLP: obs → hidden_size
+        pure_obs_dim = self.num_observations - self.num_actions  # same split as policy
+
+        # MLP: pure obs only, no actions
         self.net = nn.Sequential(
-            nn.Linear(self.num_observations, hidden_size),
+            nn.Linear(pure_obs_dim, hidden_size),
             nn.ELU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ELU(),
         )
 
-        # GRU: takes MLP output (hidden_size) → hidden_size_gru
+        # GRU: only prev_actions
         self.gru = nn.GRU(
-            input_size=hidden_size,      # MLP output feeds into GRU
-            hidden_size=hidden_size_gru, # GRU internal size
+            input_size=self.num_actions,
+            hidden_size=hidden_size_gru,
             num_layers=num_layers,
             batch_first=True,
         )
 
-        # Head: hidden_size_gru → 1 (value)
-        self.fc1 = nn.Linear(hidden_size_gru, 64)
+        # fc1 must match combined size
+        self.fc1 = nn.Linear(hidden_size + hidden_size_gru, 64)  # ← 256+512=768
         self.fc2 = nn.Linear(64, 32)
-        self.fc3 = nn.Linear(32, 1)
+        self.fc3 = nn.Linear(32, 1)  # value is scalar
 
     def get_specification(self):
         return {"rnn": {"sequence_length": self.sequence_length,
@@ -140,48 +159,67 @@ class HierarchicalGRUValue(DeterministicMixin, Model):
     def compute(self, inputs, role):
         states        = inputs["states"]
         terminated    = inputs.get("terminated", None)
-        hidden_states = inputs["rnn"][0]  # (num_layers, N, hidden_size_gru)
+        hidden_states = inputs["rnn"][0]
 
         if self.training:
-            rnn_input = states.view(-1, self.sequence_length, states.shape[-1])  # (N, L, obs_dim)
+            rnn_input = states.view(-1, self.sequence_length, states.shape[-1])
 
             hidden_states = hidden_states.view(
                 self.num_layers, -1, self.sequence_length, self.hidden_size_gru
             )
-            hidden_states = hidden_states[:, :, 0, :].contiguous()  # (num_layers, N, hidden_size_gru)
+            hidden_states = hidden_states[:, :, 0, :].contiguous()
 
-            N, L, obs_dim = rnn_input.shape
-            features_flat = self.net(rnn_input.view(N * L, obs_dim))  # (N*L, hidden_size)
-            features      = features_flat.view(N, L, self.hidden_size) # (N, L, hidden_size)
+            N, L, full_dim = rnn_input.shape
 
+            # split
+            pure_obs_seq     = rnn_input[..., :-self.num_actions]  # (N, L, pure_obs_dim)
+            prev_actions_seq = rnn_input[..., -self.num_actions:]  # (N, L, num_actions)
+            obs_dim          = pure_obs_seq.shape[-1]
+
+            # MLP
+            mlp_flat = self.net(pure_obs_seq.view(N * L, obs_dim))  # (N*L, hidden_size)
+            mlp_out  = mlp_flat.view(N, L, self.hidden_size)
+
+            # GRU
             if terminated is not None and torch.any(terminated):
-                rnn_outputs = []
-                terminated  = terminated.view(-1, self.sequence_length)
-                indexes     = (
+                rnn_outputs    = []
+                terminated_seq = terminated.view(-1, self.sequence_length)
+                indexes = (
                     [0]
-                    + (terminated[:, :-1].any(dim=0).nonzero(as_tuple=True)[0] + 1).tolist()
+                    + (terminated_seq[:, :-1].any(dim=0).nonzero(as_tuple=True)[0] + 1).tolist()
                     + [self.sequence_length]
                 )
                 for i in range(len(indexes) - 1):
                     i0, i1 = indexes[i], indexes[i + 1]
-                    rnn_output, hidden_states = self.gru(features[:, i0:i1, :], hidden_states)
-                    hidden_states[:, (terminated[:, i1 - 1]), :] = 0
-                    rnn_outputs.append(rnn_output)
+                    rnn_out, hidden_states = self.gru(prev_actions_seq[:, i0:i1, :], hidden_states)
+                    hidden_states[:, (terminated_seq[:, i1 - 1]), :] = 0
+                    rnn_outputs.append(rnn_out)
                 rnn_output = torch.cat(rnn_outputs, dim=1)
             else:
-                rnn_output, hidden_states = self.gru(features, hidden_states)
+                rnn_output, hidden_states = self.gru(prev_actions_seq, hidden_states)
+
+            mlp_out    = mlp_out.reshape(N * L, self.hidden_size)
+            rnn_output = rnn_output.reshape(N * L, self.hidden_size_gru)
 
         else:
-            features              = self.net(states).unsqueeze(1)         # (N, 1, hidden_size)
-            rnn_output, hidden_states = self.gru(features, hidden_states) # (N, 1, hidden_size_gru)
+            pure_obs     = states[..., :-self.num_actions]
+            prev_actions = states[..., -self.num_actions:]
 
-        rnn_output = torch.flatten(rnn_output, start_dim=0, end_dim=1)   # (N*L, hidden_size_gru)
+            mlp_out    = self.net(pure_obs)
+            rnn_output, hidden_states = self.gru(
+                prev_actions.unsqueeze(1), hidden_states
+            )
+            rnn_output = rnn_output.squeeze(1)
 
-        x = F.relu(self.fc1(rnn_output))
+        # combine and compute value
+        combined = torch.cat([mlp_out, rnn_output], dim=-1)  # (N*L, hidden_size + hidden_size_gru)
+
+        x = F.relu(self.fc1(combined))
         x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = self.fc3(x)                    # (N*L, 1)
 
-        return torch.tanh(x), {"rnn": [hidden_states]}
+        # NO tanh for value function — value is unbounded
+        return x, {"rnn": [hidden_states]} # ← removed torch.tanh
 
 
 
@@ -239,10 +277,10 @@ def get_ppo_agent(env, device, agent_cfg=None, log_dir="logs/defaults"):
     hidden_size        = get("hidden_size", 256)
     hidden_size_gru    = get("hidden_size_gru", 512)
     rollouts           = get("rollouts", 64)
-    learning_rate      = get("learning_rate", 5e-4)
-    learning_epochs    = get("learning_epochs", 15)
+    learning_rate      = get("learning_rate", 1e-5)
+    learning_epochs    = get("learning_epochs", 8)
     discount_factor    = get("discount_factor", 0.99)
-    entropy_loss_scale = get("entropy_loss_scale", 0.0)
+    entropy_loss_scale = get("entropy_loss_scale", 0.001)
 
     cfg = PPO_DEFAULT_CONFIG.copy()
     cfg.update(DEFAULT_PPO_CONFIG)
