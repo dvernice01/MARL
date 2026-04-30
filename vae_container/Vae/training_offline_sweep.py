@@ -271,7 +271,7 @@ def visualize(model, dataset, device, epoch, save_dir='debug_epochs'):
 
 def main():
 
-    data_dir   = "isaaclab_dataset"   # relative to vae_container/Vae/
+    data_dir   = "isaaclab_dataset_right_size"   # relative to vae_container/Vae/
     target_res = (270, 480)
 
     train_loader, val_loader = make_loaders(

@@ -166,7 +166,7 @@ def make_loaders(data_dir, val_ratio=0.1, batch_size=32,
 #         return min(beta_max, progress * 2)
 
 
-def build_beta_schedule(warmup_end=200, beta_max=10.0, total_epochs=400):
+def build_beta_schedule(warmup_end=200, beta_max=5.0, total_epochs=300):
     schedule = np.zeros(total_epochs)
     
     # Warmup phase: beta = 0
@@ -246,7 +246,7 @@ def visualize(model, dataset, device, epoch, save_dir='debug_epochs'):
 def main():
 
     # ── MODEL + OPTIMIZER ─────────────────────────────────────────────────────────
-    data_dir   = "isaaclab_dataset"   # relative to vae_container/Vae/
+    data_dir   = "isaaclab_dataset_right_size"    # relative to vae_container/Vae/
     target_res = (270, 480)
 
     train_loader, val_loader = make_loaders(
@@ -262,7 +262,7 @@ def main():
 
     model = VAE(
         input_dim      = 1,
-        latent_dim     = 512,
+        latent_dim     = 64,
         with_logits    = False,
         inference_mode = False,
     ).to(device)
