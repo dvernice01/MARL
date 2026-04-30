@@ -27,7 +27,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 # Imports for Camera
-from isaaclab.sensors import CameraCfg, RayCasterCfg, patterns
+from isaaclab.sensors import CameraCfg,RayCasterCfg, patterns
 import isaaclab.sim as sim_utils
 
 class QuadcoptervaeEnvWindow(BaseEnvWindow):
@@ -124,13 +124,14 @@ class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
             clipping_range=(0.1, 10.0), # lim_max = 10 m
         ),
         offset=CameraCfg.OffsetCfg(
-            pos=(0.0, 0.0, 0.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
+            #pos=(0.05, 0.0, 0.0),   # slightly in front of the drone body
+            pos=(0.05, 0.0, 0.0),
+            rot=(0.5, -0.5, 0.5, -0.5),  # forward-facing, ROS convention
             convention="ros",
         ),
     )
     height_scanner = RayCasterCfg(
-        prim_path="/World/envs/env_.*/Robot/body/RayCaster",
+        prim_path="{ENV_REGEX_NS}/Robot/base",
         update_period=0.02,
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
         ray_alignment="yaw",
@@ -139,9 +140,9 @@ class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
         mesh_prim_paths=["/World/defaultGroundPlane"],
     )
 
-    lin_vel_reward_scale = 0.1
-    ang_vel_reward_scale = 0.1
-    distance_to_goal_reward_scale = 25.0
-    rew_scale_action_reg = 0.1
+    # reward scales
+    lin_vel_reward_scale = 0.05
+    ang_vel_reward_scale = 0.01
+    distance_to_goal_reward_scale = 15.0
     alive_reward_scale = 0.1
-    death_reward_scale = -2000.0
+    death_reward_scale = -5.0

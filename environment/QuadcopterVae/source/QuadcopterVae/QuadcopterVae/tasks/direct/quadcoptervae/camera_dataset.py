@@ -25,9 +25,9 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 # ── Warehouse bounds ───────────────────────────────────────────────────────────
 # Adjust these to match your full_warehouse scene dimensions
-X_MIN, X_MAX =  -8.0,  8.0   # meters
-Y_MIN, Y_MAX =  -8.0,  8.0   # meters
-Z_MIN, Z_MAX =   0.5,  2.5   # camera height range
+X_MIN, X_MAX =  -15.0,  15.0   # meters
+Y_MIN, Y_MAX =  -20.0,  20.0   # meters
+Z_MIN, Z_MAX =   0.5,  7.5   # camera height range
 
 # ── Camera looks horizontally with random yaw ──────────────────────────────────
 PITCH_DEG_RANGE = (-15.0, 15.0)   # slight up/down tilt

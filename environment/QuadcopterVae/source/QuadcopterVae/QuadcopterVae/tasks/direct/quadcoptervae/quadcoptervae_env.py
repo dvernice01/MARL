@@ -31,6 +31,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 from .vae_residual_batch import VAE
+import inspect
+print("VAE loaded from:", inspect.getfile(VAE))
 from tqdm import tqdm
 import cv2
 
@@ -56,9 +58,10 @@ class PolicyNet(torch.nn.Module):
 
 class vae_config:
     use_vae = True
-    latent_dims = 512
+    latent_dims = 256
+    #032824
     model_file = (
-        "/workspace/vae_container/Vae/checkpoint/vae_best_20260427_094520.pt"
+        "/workspace/vae_container/Vae/checkpoint/vae_best_20260424_150033.pt"
     )
     model_folder = "/workspace/vae_container/Vae/checkpoint"
     image_res = (270, 480)
@@ -257,14 +260,21 @@ class VAEImageEncoder:
         self.device = device
         self.collision = CollisionImage()
         #self.collision.__init__()
-        self.vae_model = VAE(input_dim=1, latent_dim=self.config.latent_dims).to(self.device)
+        self.vae_model = VAE(input_dim=1, latent_dim=self.config.latent_dims,inference_mode = True).to(self.device)
         # combine module path with model file name
         weight_file_path = self.config.model_file
         # load model weights
         print("Loading weights from file: ", weight_file_path)
         state_dict = self.collision.clean_state_dict(torch.load(weight_file_path))
-        self.vae_model.load_state_dict(state_dict)
+        for k, v in state_dict.items():
+            print(f"{k}: {v.shape}")
+        missing, unexpected = self.vae_model.load_state_dict(state_dict, strict=False)
         #print(state_dict.keys())
+        print("Missing keys:   ", missing)
+        print("Unexpected keys:", unexpected)
+        core_keys = [k for k in missing if "conv" in k or "dense0" in k]
+        if core_keys:
+            raise RuntimeError(f"Core architecture mismatch: {core_keys}")
         self.vae_model.eval()
         self.max_depth = 10.0
 
@@ -545,22 +555,17 @@ class QuadcoptervaeEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-    # def _pre_physics_step(self, actions: torch.Tensor):
-        
-    #     self._actions = actions.clone().clamp(-1.0, 1.0)
-
-    #     # self.target_vel_cmd[:,:3] = self._actions[:, :3]
-    #     # self.target_yaw_cmd = self._actions[:, 3]
-    #     vel_zero = torch.zeros(self.num_envs, 4, device=self.device)
-    #     #vel_zero[:,3] = 0.3
-    #     vel_zero[:,0] = 1.0
-    #     self.target_vel_cmd[:,:3] = vel_zero[:,:3]
-    #     self.target_yaw_cmd = vel_zero[:,3]
     def _pre_physics_step(self, actions: torch.Tensor):
-        #self._prev_actions = self._actions.clone() 
+        
         self._actions = actions.clone().clamp(-1.0, 1.0)
-        self.target_vel_cmd[:,:3] = self._actions[:, :3]
-        self.target_yaw_cmd = self._actions[:, 3]
+
+        # self.target_vel_cmd[:,:3] = self._actions[:, :3]
+        # self.target_yaw_cmd = self._actions[:, 3]
+        vel_zero = torch.zeros(self.num_envs, 4, device=self.device)
+        #vel_zero[:,3] = 0.3
+        vel_zero[:,0] = 1.0
+        self.target_vel_cmd[:,:3] = vel_zero[:,:3]
+        self.target_yaw_cmd = vel_zero[:,3]
 
 
     def _apply_action(self):
@@ -596,13 +601,7 @@ class QuadcoptervaeEnv(DirectRLEnv):
             )
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
         depth = self.camera.data.output["distance_to_camera"]  # (N, H, W, 1)
-        #print(torch.isnan(depth).all())
-        depth = torch.nan_to_num(
-            depth,
-            nan=self.max_depth,
-            posinf=self.max_depth,
-            neginf=0.0
-        )
+
         # preprocess (VERY IMPORTANT)
         collision = self.vae_encoder.preprocess(depth)
         assert not torch.isnan(collision).any(), f"NaN in collision: {collision.min()}, {collision.max()}"
@@ -610,11 +609,8 @@ class QuadcoptervaeEnv(DirectRLEnv):
     
         # encode
         latent = self.vae_encoder.encode(collision)  # (N, latent_dim)
-        #print(self.camera.data.output.keys())
 
         if self.common_step_counter % 20 == 0:
-            print("depth std:", depth.std().item())
-            # print("collision std:", collision.std().item())
             depth_vis = depth[0, :, :, 0] / self.max_depth
             depth_np = depth_vis.detach().cpu().numpy()
             plt.imshow(depth_np, cmap='plasma', vmin=0, vmax=1)
@@ -692,7 +688,7 @@ class QuadcoptervaeEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         died = (self._robot.data.root_pos_w[:, 2] < 0.1) | \
-                (self._robot.data.root_pos_w[:, 2] > 10.0) | \
+                (self._robot.data.root_pos_w[:, 2] > 7.9) | \
                 (self.distance_to_bounds_x < 0.0) | \
                 (self.distance_to_bounds_y < 0.0)
         
