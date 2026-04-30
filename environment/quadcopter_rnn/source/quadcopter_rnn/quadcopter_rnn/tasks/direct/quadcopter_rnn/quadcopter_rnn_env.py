@@ -269,7 +269,7 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
         obs = torch.cat(
             [
-                self._prev_actions,
+                #self._prev_actions,
                 self.rel_pos_b,
                 self._robot.data.root_lin_vel_b,
                 self._robot.data.root_ang_vel_b,

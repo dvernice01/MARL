@@ -55,7 +55,7 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
     decimation= 10
     decimation_low_level = 2
     action_space = 4
-    observation_space = 15
+    observation_space = 11
     state_space = 0
     debug_vis = True
 
@@ -77,11 +77,25 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    terrain: TerrainImporterCfg = TerrainImporterCfg(
+    # terrain: TerrainImporterCfg = TerrainImporterCfg(
+    #     prim_path="/World/ground",
+    #     terrain_type="usd",
+    #     usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/full_warehouse.usd",
+    #     collision_group=1,
+    #     physics_material=sim_utils.RigidBodyMaterialCfg(
+    #         friction_combine_mode="multiply",
+    #         restitution_combine_mode="multiply",
+    #         static_friction=1.0,
+    #         dynamic_friction=1.0,
+    #         restitution=0.0,
+    #     ),
+    #     debug_vis=False,
+    # )
+
+    terrain = TerrainImporterCfg(
         prim_path="/World/ground",
-        terrain_type="usd",
-        usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/full_warehouse.usd",
-        collision_group=1,
+        terrain_type="plane",
+        collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -94,7 +108,7 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1, env_spacing=2.5, replicate_physics=True
+        num_envs=4096, env_spacing=2.5, replicate_physics=True
     )
 
     # robot
