@@ -3,6 +3,16 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+
+
+"""
+Buonds full_warehouse:
+X: -28.00 → 8.00  (width=36.00m)
+Y: -41.40 → 33.42  (depth=74.82m)
+Z: -0.01 → 9.30  (height=9.31m)
+"""
+
+
 from __future__ import annotations
 
 import math
@@ -42,19 +52,33 @@ OCCUPANCY_MAP_PATH = "/workspace/environment/quadcopter_rnn/warehouse_3d/occupan
 OCCUPANCY_META_PATH = "/workspace/environment/quadcopter_rnn/warehouse_3d/occupancy_3d_meta.npy"
 LOCAL_MAPS_SAVE_DIR = "/workspace/environment/quadcopter_rnn/outputs/local_maps"
 LOCAL_MAP_SAVE_EVERY = 100   # steps between saves; set to 0 to disable
-LOCAL_N = 32                 # local cube size: n x n x n voxels
+LOCAL_NZ = 8                 # local map depth  (z axis)
+LOCAL_NY = 16                # local map height (y axis)
+LOCAL_NX = 16                # local map width  (x axis)
 
 
-def visualize_occupancy_3d(occ_map):
-    ix, iy, iz = torch.where(occ_map > 0)
-    ix = ix.detach().cpu()
-    iy = iy.detach().cpu()
-    iz = iz.detach().cpu()
-    fig = plt.figure()
+def visualize_occupancy_3d(occ_map: torch.Tensor, save_path: str = "occupancy_map.png"):
+    """
+    3D scatter plot of the global occupancy map (OCCUPIED voxels only).
+    occ_map: (n_z, n_y, n_x) tensor with values {0=UNKNOWN, 1=FREE, 2=OCCUPIED}
+    Axes are labelled in voxel index space (z-first layout).
+    """
+    # occ_map is (n_z, n_y, n_x) — torch.where returns indices in that order
+    iz, iy, ix = torch.where(occ_map == 2)
+    iz = iz.detach().cpu().numpy()
+    iy = iy.detach().cpu().numpy()
+    ix = ix.detach().cpu().numpy()
+
+    fig = plt.figure(figsize=(10, 7))
     ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(ix.numpy(), iy.numpy(), iz.numpy(), s=1, c='red', alpha=0.3)
-    plt.show()
-    plt.savefig('occupancy_map.png')
+    ax.scatter(ix, iy, iz, s=1, c='red', alpha=0.3)
+    ax.set_xlabel("x (voxels)")
+    ax.set_ylabel("y (voxels)")
+    ax.set_zlabel("z (voxels)")
+    ax.set_title(f"Global Occupancy Map — {iz.shape[0]} occupied voxels")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    print(f"[visualize_occupancy_3d] Saved → {save_path}")
     plt.close()
 
 
@@ -69,7 +93,7 @@ def hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200, 100), 
     cx = map_dims[0] // 2
     cy = map_dims[1] // 2
     cz = map_dims[2] // 2
-    ix = ((pts[:, 0] - origin[0]) / grid_size + cx).long() # che formual è?
+    ix = ((pts[:, 0] - origin[0]) / grid_size + cx).long()
     iy = ((pts[:, 1] - origin[1]) / grid_size + cy).long()
     iz = ((pts[:, 2] - origin[2]) / grid_size + cz).long()
     mask = (
@@ -99,6 +123,13 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
         self.rel_pos_b = torch.zeros(self.num_envs, 3, device=self.device)
 
+        self.x_min = -28.0
+        self.x_max = 8.0
+        self.y_min = -41.4
+        self.y_max = 33.42
+        self.z_min = 0.0
+        self.z_max = 9.30
+        
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
@@ -149,9 +180,13 @@ class QuadcopterRnnEnv(DirectRLEnv):
         )  # world coords of voxel [0, 0, 0]
         self.occ_map_dims = self.global_occ_map.shape  # (n_z, n_y, n_x)
 
-        # ── Local map parameters ──────────────────────────────────────────────
-        self.local_n = LOCAL_N
-        self.local_r_vox = LOCAL_N // 2  # half-extent in voxels
+        # ── Local map parameters — output shape (2, 8, 16, 16): SVS first, OCC second ──
+        self.local_nz = LOCAL_NZ          # z half-extent: 8 voxels
+        self.local_ny = LOCAL_NY          # y half-extent: 16 voxels
+        self.local_nx = LOCAL_NX          # x half-extent: 16 voxels
+        self.local_hz = LOCAL_NZ // 2     # half-extents for cropping
+        self.local_hy = LOCAL_NY // 2
+        self.local_hx = LOCAL_NX // 2
 
         # ── SECTION 2: Visit count grid — (num_envs, n_z, n_y, n_x) ─────────
         self.global_visit_counts = torch.zeros(
@@ -162,6 +197,12 @@ class QuadcopterRnnEnv(DirectRLEnv):
         os.makedirs(LOCAL_MAPS_SAVE_DIR, exist_ok=True)
         print(f"[LocalMap] Occupancy map loaded: shape={self.occ_map_dims}, cell={self.occ_grid_size}m")
 
+        # ── Visualize global occupancy map once at startup ────────────────────
+        visualize_occupancy_3d(
+            self.global_occ_map,
+            save_path="/workspace/environment/quadcopter_rnn/outputs/global_occupancy_3d.png"
+        )
+
     # ── SECTION 2: Update visit counts (call every step) ──────────────────────
     def _update_visit_counts(self, env_ids: torch.Tensor | None = None):
         """Increment the visit count voxel at each drone's current position."""
@@ -169,9 +210,8 @@ class QuadcopterRnnEnv(DirectRLEnv):
             env_ids = torch.arange(self.num_envs, device=self.device)
 
         pos_w = self._robot.data.root_pos_w[env_ids]  # (E, 3)
-        # RAPPRESENTA SEMPRE LA CONVERSIONE DA WORLD A VOXEL COORDS,
-        # CHE DIPENDE DA ORIGIN E GRID SIZE DELLA MAPPA DI OCCUPANCY
-        iz = ((pos_w[:, 2] - self.occ_origin[2]) / self.occ_grid_size).long() 
+
+        iz = ((pos_w[:, 2] - self.occ_origin[2]) / self.occ_grid_size).long()
         iy = ((pos_w[:, 1] - self.occ_origin[1]) / self.occ_grid_size).long()
         ix = ((pos_w[:, 0] - self.occ_origin[0]) / self.occ_grid_size).long()
 
@@ -185,24 +225,21 @@ class QuadcopterRnnEnv(DirectRLEnv):
     # ── SECTION 2: Build local SVS map ────────────────────────────────────────
     def _build_local_svs_map(self, env_id: int) -> torch.Tensor:
         """
-        Crop local n x n x n visit count region around the drone,
+        Crop local (NZ, NY, NX) = (8, 16, 16) visit count region around the drone,
         normalize and apply Shannon entropy per cell.
-        Returns: (n_z, n_y, n_x) SVS map.
+        Returns: (8, 16, 16) SVS map.
         """
         pos_w = self._robot.data.root_pos_w[env_id]
         cz = int((pos_w[2] - self.occ_origin[2]) / self.occ_grid_size)
         cy = int((pos_w[1] - self.occ_origin[1]) / self.occ_grid_size)
         cx = int((pos_w[0] - self.occ_origin[0]) / self.occ_grid_size)
 
-        h = self.local_r_vox
-        n = self.local_n
         NZ, NY, NX = self.occ_map_dims
+        svs = torch.zeros((self.local_nz, self.local_ny, self.local_nx), dtype=torch.float32, device=self.device)
 
-        svs = torch.zeros((n, n, n), dtype=torch.float32, device=self.device)
-
-        z0, z1 = cz - h, cz + h
-        y0, y1 = cy - h, cy + h
-        x0, x1 = cx - h, cx + h
+        z0, z1 = cz - self.local_hz, cz + self.local_hz
+        y0, y1 = cy - self.local_hy, cy + self.local_hy
+        x0, x1 = cx - self.local_hx, cx + self.local_hx
 
         sz0, sz1 = max(z0, 0), min(z1, NZ)
         sy0, sy1 = max(y0, 0), min(y1, NY)
@@ -220,29 +257,26 @@ class QuadcopterRnnEnv(DirectRLEnv):
                 entropy = torch.where(p > 0, -p * torch.log(p), torch.zeros_like(p))
                 svs[dz0:dz1, dy0:dy1, dx0:dx1] = entropy
 
-        return svs  # (n, n, n)
+        return svs  # (8, 16, 16)
 
     # ── SECTION 3: Sample local occupancy map from global ─────────────────────
     def _build_local_occ_map(self, env_id: int) -> torch.Tensor:
         """
-        Crop n x n x n local occupancy map centered on the drone.
+        Crop (8, 16, 16) local occupancy map centered on the drone.
         OCCUPIED (==2) → 1.0, FREE/UNKNOWN → 0.0.
-        Returns: (n_z, n_y, n_x) binary occupancy map.
+        Returns: (8, 16, 16) binary occupancy map.
         """
         pos_w = self._robot.data.root_pos_w[env_id]
         cz = int((pos_w[2] - self.occ_origin[2]) / self.occ_grid_size)
         cy = int((pos_w[1] - self.occ_origin[1]) / self.occ_grid_size)
         cx = int((pos_w[0] - self.occ_origin[0]) / self.occ_grid_size)
 
-        h = self.local_r_vox
-        n = self.local_n
         NZ, NY, NX = self.occ_map_dims
+        local_occ = torch.zeros((self.local_nz, self.local_ny, self.local_nx), dtype=torch.float32, device=self.device)
 
-        local_occ = torch.zeros((n, n, n), dtype=torch.float32, device=self.device)
-
-        z0, z1 = cz - h, cz + h
-        y0, y1 = cy - h, cy + h
-        x0, x1 = cx - h, cx + h
+        z0, z1 = cz - self.local_hz, cz + self.local_hz
+        y0, y1 = cy - self.local_hy, cy + self.local_hy
+        x0, x1 = cx - self.local_hx, cx + self.local_hx
 
         sz0, sz1 = max(z0, 0), min(z1, NZ)
         sy0, sy1 = max(y0, 0), min(y1, NY)
@@ -256,23 +290,22 @@ class QuadcopterRnnEnv(DirectRLEnv):
             raw = self.global_occ_map[sz0:sz1, sy0:sy1, sx0:sx1]
             local_occ[dz0:dz1, dy0:dy1, dx0:dx1] = (raw == 2).float()
 
-        return local_occ  # (n, n, n)
+        return local_occ  # (8, 16, 16)
 
     # ── SECTION 4: Stack the two maps as separate channels ────────────────────
     def _build_local_combined_map(self, env_id: int) -> torch.Tensor:
         """
-        Returns (2, n, n, n):
-          channel 0 = local binary occupancy
-          channel 1 = local SVS (Shannon entropy of visit distribution)
-        Stacking (not summing) preserves the semantic independence of the two maps.
+        Returns (2, 8, 16, 16):
+          channel 0 = local SVS  (Shannon entropy of visit distribution)
+          channel 1 = local binary occupancy
         """
-        local_occ = self._build_local_occ_map(env_id)
-        local_svs = self._build_local_svs_map(env_id)
-        return torch.stack([local_occ, local_svs], dim=0)  # (2, n, n, n)
+        local_svs = self._build_local_svs_map(env_id)   # (8, 16, 16)
+        local_occ = self._build_local_occ_map(env_id)   # (8, 16, 16)
+        return torch.stack([local_svs, local_occ], dim=0)  # (2, 8, 16, 16)
 
     # ── SECTION 5: Save combined maps ─────────────────────────────────────────
     def _save_local_maps(self):
-        """Save combined (2, n, n, n) maps for all envs to disk."""
+        """Save combined (2, 8, 16, 16) maps for all envs to disk."""
         step = self.common_step_counter
         for env_id in range(self.num_envs):
             combined = self._build_local_combined_map(env_id)  # (2, n, n, n)
@@ -392,17 +425,22 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self._episode_sums["final_distance_to_goal"] += self.final_distance_to_goal * self.step_dt
         distance_to_goal_mapped = 1 - torch.tanh(self.final_distance_to_goal / 0.8)
 
-        square_side = self.arena_size
-        relative_distance_to_bounds_x = torch.abs((origins[:, 0]) - self._robot.data.root_pos_w[:, 0])
-        relative_distance_to_bounds_y = torch.abs((origins[:, 1]) - self._robot.data.root_pos_w[:, 1])
-        self.distance_to_bounds_x = (square_side / 2) - relative_distance_to_bounds_x
-        self.distance_to_bounds_y = (square_side / 2) - relative_distance_to_bounds_y
+        #pos_local = self._robot.data.root_pos_w - origins[:, 0]  # (num_envs, 3)
+        self.distance_to_bounds_x = ((self._robot.data.root_pos_w[:, 0] - origins[:, 0] > self.x_min)) & ((self.x_max > self._robot.data.root_pos_w[:, 0] - origins[:, 0]))
+        self.distance_to_bounds_y = ((self._robot.data.root_pos_w[:, 1] - origins[:, 1] > self.y_min)) & ((self.y_max > self._robot.data.root_pos_w[:, 1] - origins[:, 1]))
+        # square_side = self.arena_size
+        # relative_distance_to_bounds_x = torch.abs((origins[:, 0]) - self._robot.data.root_pos_w[:, 0])
+        # relative_distance_to_bounds_y = torch.abs((origins[:, 1]) - self._robot.data.root_pos_w[:, 1])
+        # self.distance_to_bounds_x = (square_side / 2) - relative_distance_to_bounds_x
+        # self.distance_to_bounds_y = (square_side / 2) - relative_distance_to_bounds_y
 
         action_diff = self._actions - self._prev_actions
         action_reg_diff = torch.norm(action_diff, p=2, dim=-1)
         action_reg_diff = 1 - torch.tanh(action_reg_diff / 0.8)
 
-        is_alive = torch.logical_and(self.distance_to_bounds_x >= 0.0, self.distance_to_bounds_y >= 0.0)
+        is_alive_bounds = torch.logical_and(self.distance_to_bounds_x, self.distance_to_bounds_y)
+        is_alive_height = torch.logical_and(self._robot.data.root_pos_w[:, 2] > self.z_min, self._robot.data.root_pos_w[:, 2] < self.z_max)
+        is_alive = torch.logical_and(is_alive_bounds, is_alive_height)
         life = torch.where(is_alive, self.cfg.alive_reward_scale, self.cfg.death_reward_scale)
 
         rewards = {
@@ -419,10 +457,10 @@ class QuadcopterRnnEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        died = (self._robot.data.root_pos_w[:, 2] < 0.1) | \
-               (self._robot.data.root_pos_w[:, 2] > 2.0) | \
-               (self.distance_to_bounds_x < 0.0) | \
-               (self.distance_to_bounds_y < 0.0)
+        died = (self._robot.data.root_pos_w[:, 2] < self.z_min) | \
+               (self._robot.data.root_pos_w[:, 2] > self.z_max) | \
+               ( ~self.distance_to_bounds_x.bool()) | \
+               ( ~self.distance_to_bounds_y.bool())
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -455,9 +493,10 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self._prev_actions[env_ids] = 0.0
         self._actions[env_ids] = 0.0
 
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        self._desired_pos_w[env_ids, 0] = torch.zeros_like(self._desired_pos_w[env_ids, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
+        self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(self.y_min + 1.0, self.y_max - 1.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(self.z_min + 1.0, self.z_max - 1.0)
 
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
