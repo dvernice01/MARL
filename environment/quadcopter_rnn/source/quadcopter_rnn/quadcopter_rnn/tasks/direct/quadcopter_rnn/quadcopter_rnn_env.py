@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import math
+import os
 import torch
+import numpy as np
 from collections.abc import Sequence
 import gymnasium as gym
 
@@ -23,8 +25,8 @@ from isaaclab.utils.math import subtract_frame_transforms
 import isaaclab.utils.math as math_utils
 
 from .quadcopter_rnn_env_cfg import QuadcopterRnnEnvCfg
-from isaaclab_assets import CRAZYFLIE_CFG  
-from isaaclab.markers import CUBOID_MARKER_CFG  
+from isaaclab_assets import CRAZYFLIE_CFG
+from isaaclab.markers import CUBOID_MARKER_CFG
 from isaaclab.sensors import Camera, CameraCfg, RayCaster
 import matplotlib.pyplot as plt
 import wandb
@@ -33,8 +35,15 @@ from mpl_toolkits.mplot3d import Axes3D
 
 wandb.login()
 
-# Project that the run is recorded to
 project = "quadcopter_rnn"
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+OCCUPANCY_MAP_PATH = "/workspace/environment/quadcopter_rnn/warehouse_3d/occupancy_3d.npy"
+OCCUPANCY_META_PATH = "/workspace/environment/quadcopter_rnn/warehouse_3d/occupancy_3d_meta.npy"
+LOCAL_MAPS_SAVE_DIR = "/workspace/environment/quadcopter_rnn/outputs/local_maps"
+LOCAL_MAP_SAVE_EVERY = 100   # steps between saves; set to 0 to disable
+LOCAL_N = 32                 # local cube size: n x n x n voxels
+
 
 def visualize_occupancy_3d(occ_map):
     ix, iy, iz = torch.where(occ_map > 0)
@@ -48,48 +57,31 @@ def visualize_occupancy_3d(occ_map):
     plt.savefig('occupancy_map.png')
     plt.close()
 
-def hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200, 100), origin=None):
-    """
-    ray_hits_w: (N, B, 3) tensor from RayCaster
-    grid_size: meters per voxel
-    map_dims: (X, Y, Z) voxel grid dimensions
-    origin: (3,) tensor or list, world-space origin of the grid center. Defaults to (0,0,0).
-    """
-    # Flatten all rays across envs: (N*B, 3)
-    pts = ray_hits_w.reshape(-1, 3)
 
-    # Filter invalid hits
+def hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200, 100), origin=None):
+    pts = ray_hits_w.reshape(-1, 3)
     valid = torch.isfinite(pts).all(dim=-1)
     pts = pts[valid]
-
-    # Grid center offset
     if origin is None:
         origin = torch.zeros(3, device=pts.device)
     else:
         origin = torch.tensor(origin, device=pts.device, dtype=pts.dtype)
-
     cx = map_dims[0] // 2
     cy = map_dims[1] // 2
     cz = map_dims[2] // 2
-
-    # Convert world coords to voxel indices
     ix = ((pts[:, 0] - origin[0]) / grid_size + cx).long()
     iy = ((pts[:, 1] - origin[1]) / grid_size + cy).long()
     iz = ((pts[:, 2] - origin[2]) / grid_size + cz).long()
-
-    # Clip to grid bounds
     mask = (
         (ix >= 0) & (ix < map_dims[0]) &
         (iy >= 0) & (iy < map_dims[1]) &
         (iz >= 0) & (iz < map_dims[2])
     )
     ix, iy, iz = ix[mask], iy[mask], iz[mask]
-
-    # Fill 3D voxel grid
     occ_map = torch.zeros(map_dims, dtype=torch.float32, device=pts.device)
     occ_map[ix, iy, iz] = 1.0
+    return occ_map
 
-    return occ_map  # shape: (X, Y, Z)
 
 class QuadcopterRnnEnv(DirectRLEnv):
     cfg: QuadcopterRnnEnvCfg
@@ -97,19 +89,16 @@ class QuadcopterRnnEnv(DirectRLEnv):
     def __init__(self, cfg: QuadcopterRnnEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
-        # Total thrust and moment applied to the base of the quadcopter
         self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self.low_level_actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self._thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
-        #self.decimator_low_level = 2
         self.target_vel_cmd = torch.zeros(self.num_envs, 3, device=self.device)
         self.target_yaw_cmd = torch.zeros(self.num_envs, 1, device=self.device)
 
-        # Goal position
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
         self.rel_pos_b = torch.zeros(self.num_envs, 3, device=self.device)
-        # Logging
+
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
@@ -123,33 +112,171 @@ class QuadcopterRnnEnv(DirectRLEnv):
                 "final_distance_to_goal",
             ]
         }
-        # Get specific body indices
+
         self._body_id = self._robot.find_bodies("body")[0]
         self._robot_mass = self._robot.root_physx_view.get_masses()[0].sum()
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
-        # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
 
-        # AGGIUNGO DEGLI INIT CHE MI SERVIRANNO
         self.distance_to_bounds_x = torch.zeros(self.num_envs, device=self.device)
         self.distance_to_bounds_y = torch.zeros(self.num_envs, device=self.device)
         self.final_distance_to_goal_b = torch.zeros(self.num_envs, device=self.device)
-        # INIT PER CURRICULUM LEARNING
+
         self.curriculum_level = 0
         self.arena_size = torch.ones(self.num_envs, device=self.device) * 4.0
 
-        # Accumulatori per valutazione
         self.accum_deaths = 0.0
         self.accum_timeouts = 0.0
         self.accum_reward = 0.0
         self.accum_counter = 0
 
-        # Reward massimo teorico per episodio (per normalizzare)
-        #max_theoretical_reward = self.cfg.alive_reward_scale * self.cfg.distance_to_goal_reward_scale * self.max_episode_length_s
         self.policy_network = self._load_policy_network()
         self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
+
+        # ── SECTION 1: Load global occupancy map ──────────────────────────────
+        occ_meta = np.load(OCCUPANCY_META_PATH, allow_pickle=True).item()
+        self.global_occ_map = torch.tensor(
+            np.load(OCCUPANCY_MAP_PATH),
+            dtype=torch.float32, device=self.device
+        )  # shape: (n_z, n_y, n_x)
+
+        self.occ_grid_size = float(occ_meta["cell_size"])
+        self.occ_origin = torch.tensor(
+            [occ_meta["x_min"], occ_meta["y_min"], occ_meta["z_min"]],
+            dtype=torch.float32, device=self.device
+        )  # world coords of voxel [0, 0, 0]
+        self.occ_map_dims = self.global_occ_map.shape  # (n_z, n_y, n_x)
+
+        # ── Local map parameters ──────────────────────────────────────────────
+        self.local_n = LOCAL_N
+        self.local_r_vox = LOCAL_N // 2  # half-extent in voxels
+
+        # ── SECTION 2: Visit count grid — (num_envs, n_z, n_y, n_x) ─────────
+        self.global_visit_counts = torch.zeros(
+            (self.num_envs, *self.occ_map_dims),
+            dtype=torch.float32, device=self.device
+        )
+
+        os.makedirs(LOCAL_MAPS_SAVE_DIR, exist_ok=True)
+        print(f"[LocalMap] Occupancy map loaded: shape={self.occ_map_dims}, cell={self.occ_grid_size}m")
+
+    # ── SECTION 2: Update visit counts (call every step) ──────────────────────
+    def _update_visit_counts(self, env_ids: torch.Tensor | None = None):
+        """Increment the visit count voxel at each drone's current position."""
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+
+        pos_w = self._robot.data.root_pos_w[env_ids]  # (E, 3)
+
+        iz = ((pos_w[:, 2] - self.occ_origin[2]) / self.occ_grid_size).long()
+        iy = ((pos_w[:, 1] - self.occ_origin[1]) / self.occ_grid_size).long()
+        ix = ((pos_w[:, 0] - self.occ_origin[0]) / self.occ_grid_size).long()
+
+        NZ, NY, NX = self.occ_map_dims
+        valid = (iz >= 0) & (iz < NZ) & (iy >= 0) & (iy < NY) & (ix >= 0) & (ix < NX)
+
+        for i, e in enumerate(env_ids):
+            if valid[i]:
+                self.global_visit_counts[e, iz[i], iy[i], ix[i]] += 1.0
+
+    # ── SECTION 2: Build local SVS map ────────────────────────────────────────
+    def _build_local_svs_map(self, env_id: int) -> torch.Tensor:
+        """
+        Crop local n x n x n visit count region around the drone,
+        normalize and apply Shannon entropy per cell.
+        Returns: (n_z, n_y, n_x) SVS map.
+        """
+        pos_w = self._robot.data.root_pos_w[env_id]
+        cz = int((pos_w[2] - self.occ_origin[2]) / self.occ_grid_size)
+        cy = int((pos_w[1] - self.occ_origin[1]) / self.occ_grid_size)
+        cx = int((pos_w[0] - self.occ_origin[0]) / self.occ_grid_size)
+
+        h = self.local_r_vox
+        n = self.local_n
+        NZ, NY, NX = self.occ_map_dims
+
+        svs = torch.zeros((n, n, n), dtype=torch.float32, device=self.device)
+
+        z0, z1 = cz - h, cz + h
+        y0, y1 = cy - h, cy + h
+        x0, x1 = cx - h, cx + h
+
+        sz0, sz1 = max(z0, 0), min(z1, NZ)
+        sy0, sy1 = max(y0, 0), min(y1, NY)
+        sx0, sx1 = max(x0, 0), min(x1, NX)
+
+        dz0, dz1 = sz0 - z0, sz1 - z0
+        dy0, dy1 = sy0 - y0, sy1 - y0
+        dx0, dx1 = sx0 - x0, sx1 - x0
+
+        if sz0 < sz1 and sy0 < sy1 and sx0 < sx1:
+            counts = self.global_visit_counts[env_id, sz0:sz1, sy0:sy1, sx0:sx1]
+            Nt = counts.sum()
+            if Nt > 0:
+                p = counts / Nt
+                entropy = torch.where(p > 0, -p * torch.log(p), torch.zeros_like(p))
+                svs[dz0:dz1, dy0:dy1, dx0:dx1] = entropy
+
+        return svs  # (n, n, n)
+
+    # ── SECTION 3: Sample local occupancy map from global ─────────────────────
+    def _build_local_occ_map(self, env_id: int) -> torch.Tensor:
+        """
+        Crop n x n x n local occupancy map centered on the drone.
+        OCCUPIED (==2) → 1.0, FREE/UNKNOWN → 0.0.
+        Returns: (n_z, n_y, n_x) binary occupancy map.
+        """
+        pos_w = self._robot.data.root_pos_w[env_id]
+        cz = int((pos_w[2] - self.occ_origin[2]) / self.occ_grid_size)
+        cy = int((pos_w[1] - self.occ_origin[1]) / self.occ_grid_size)
+        cx = int((pos_w[0] - self.occ_origin[0]) / self.occ_grid_size)
+
+        h = self.local_r_vox
+        n = self.local_n
+        NZ, NY, NX = self.occ_map_dims
+
+        local_occ = torch.zeros((n, n, n), dtype=torch.float32, device=self.device)
+
+        z0, z1 = cz - h, cz + h
+        y0, y1 = cy - h, cy + h
+        x0, x1 = cx - h, cx + h
+
+        sz0, sz1 = max(z0, 0), min(z1, NZ)
+        sy0, sy1 = max(y0, 0), min(y1, NY)
+        sx0, sx1 = max(x0, 0), min(x1, NX)
+
+        dz0, dz1 = sz0 - z0, sz1 - z0
+        dy0, dy1 = sy0 - y0, sy1 - y0
+        dx0, dx1 = sx0 - x0, sx1 - x0
+
+        if sz0 < sz1 and sy0 < sy1 and sx0 < sx1:
+            raw = self.global_occ_map[sz0:sz1, sy0:sy1, sx0:sx1]
+            local_occ[dz0:dz1, dy0:dy1, dx0:dx1] = (raw == 2).float()
+
+        return local_occ  # (n, n, n)
+
+    # ── SECTION 4: Stack the two maps as separate channels ────────────────────
+    def _build_local_combined_map(self, env_id: int) -> torch.Tensor:
+        """
+        Returns (2, n, n, n):
+          channel 0 = local binary occupancy
+          channel 1 = local SVS (Shannon entropy of visit distribution)
+        Stacking (not summing) preserves the semantic independence of the two maps.
+        """
+        local_occ = self._build_local_occ_map(env_id)
+        local_svs = self._build_local_svs_map(env_id)
+        return torch.stack([local_occ, local_svs], dim=0)  # (2, n, n, n)
+
+    # ── SECTION 5: Save combined maps ─────────────────────────────────────────
+    def _save_local_maps(self):
+        """Save combined (2, n, n, n) maps for all envs to disk."""
+        step = self.common_step_counter
+        for env_id in range(self.num_envs):
+            combined = self._build_local_combined_map(env_id)  # (2, n, n, n)
+            path = os.path.join(LOCAL_MAPS_SAVE_DIR, f"env{env_id}_step{step}.npy")
+            np.save(path, combined.cpu().numpy())
 
     def _load_policy_network(self):
         checkpoint = torch.load(
@@ -160,8 +287,8 @@ class QuadcopterRnnEnv(DirectRLEnv):
         preprocessor = checkpoint["state_preprocessor"]
         self.ll_running_mean     = preprocessor["running_mean"].float().to(self.device)
         self.ll_running_variance = preprocessor["running_variance"].float().to(self.device)
-        self.ll_epsilon          = 1e-8 # skrl default
-        self.ll_clip_threshold   = 5.0  # skrl default
+        self.ll_epsilon          = 1e-8
+        self.ll_clip_threshold   = 5.0
 
         class PolicyNet(torch.nn.Module):
             def __init__(self):
@@ -178,67 +305,44 @@ class QuadcopterRnnEnv(DirectRLEnv):
 
         policy = PolicyNet()
         missing, unexpected = policy.load_state_dict(checkpoint["policy"], strict=False)
-
-        # print(f"Missing keys:    {missing}")      # should only be log_std_parameter
-        # print(f"Unexpected keys: {unexpected}")   # should be empty
-
         assert "net.0.weight" not in missing, "Core weights failed to load!"
-
         policy.to(self.device)
         policy.eval()
         return policy
-        
+
     def _normalize_ll_obs(self, obs: torch.Tensor) -> torch.Tensor:
-        # Exact formula from the docs:
-        # clip((x - mean) / sqrt(variance + epsilon), -c, c)
         normalized = (obs - self.ll_running_mean) / torch.sqrt(self.ll_running_variance + self.ll_epsilon)
         return torch.clamp(normalized, -self.ll_clip_threshold, self.ll_clip_threshold)
-
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
-        # self.ray_caster = RayCaster(self.cfg.height_scanner)
-        # self.scene.sensors["raycaster"] = self.ray_caster
         self.scene.clone_environments(copy_from_source=False)
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
-        # we need to explicitly filter collisions for CPU simulation
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
-        # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-    #def _pre_physics_step(self, actions: torch.Tensor):
-        # self._prev_actions = self._actions.clone() 
-        # self._actions = actions.clone().clamp(-1.0, 1.0)
-        # self.target_vel_cmd[:,:3] = self._actions[:, :3]
-        # self.target_yaw_cmd = self._actions[:, 3]
     def _pre_physics_step(self, actions: torch.Tensor):
         self._prev_actions = self._actions.clone()
         self._actions = actions.clone().clamp(-1.0, 1.0)
-
-        # ✅ use actual policy actions
         self.target_vel_cmd[:, :3] = self._actions[:, :3] * self.cfg.max_velocity
         self.target_yaw_cmd = self._actions[:, 3:4] * self.cfg.max_yaw_rate
 
     def _apply_action(self):
-
         if self.common_step_counter % self.cfg.decimation_low_level == 0:
-
             low_level_obs = torch.hstack((
-                self._robot.data.root_lin_vel_b,  # 3
-                self._robot.data.root_ang_vel_b,  # 3
-                self._robot.data.projected_gravity_b,  # 3
-                self.target_vel_cmd,  # 3
-                self.target_yaw_cmd.reshape(-1, 1),  # 1
+                self._robot.data.root_lin_vel_b,
+                self._robot.data.root_ang_vel_b,
+                self._robot.data.projected_gravity_b,
+                self.target_vel_cmd,
+                self.target_yaw_cmd.reshape(-1, 1),
             ))
             low_level_obs = low_level_obs.to(self.device).to(torch.float32)
-            
-            # Inference with frozen policy
             with torch.no_grad():
                 obs_norm = self._normalize_ll_obs(low_level_obs)
                 self.low_level_actions = self.policy_network(obs_norm)
@@ -251,25 +355,22 @@ class QuadcopterRnnEnv(DirectRLEnv):
         )
 
     def _get_observations(self) -> dict:
+        # ── Update visit counts at every step (all envs) ──────────────────────
+        self._update_visit_counts()
 
-        #ray_caster_data = self.ray_caster._data
-
-        # ray_hits_w = self.ray_caster._data.ray_hits_w  # (N, B, 3)
-
-        # # Generate occupancy map
-        # occ_map = hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200, 100))
-
-        #visualize_occupancy_3d(occ_map)
+        # ── Save combined maps periodically ───────────────────────────────────
+        if LOCAL_MAP_SAVE_EVERY > 0 and self.common_step_counter % LOCAL_MAP_SAVE_EVERY == 0:
+            self._save_local_maps()
 
         self.rel_pos_b, _ = subtract_frame_transforms(
-                self._robot.data.root_pos_w, 
-                self._robot.data.root_quat_w, 
-                self._desired_pos_w
-            )
+            self._robot.data.root_pos_w,
+            self._robot.data.root_quat_w,
+            self._desired_pos_w
+        )
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
+
         obs = torch.cat(
             [
-                #self._prev_actions,
                 self.rel_pos_b,
                 self._robot.data.root_lin_vel_b,
                 self._robot.data.root_ang_vel_b,
@@ -289,22 +390,19 @@ class QuadcopterRnnEnv(DirectRLEnv):
         ang_vel = 1 - torch.tanh(ang_vel_sum / 0.8)
         self._episode_sums["final_distance_to_goal"] += self.final_distance_to_goal * self.step_dt
         distance_to_goal_mapped = 1 - torch.tanh(self.final_distance_to_goal / 0.8)
-        
-        square_side = self.arena_size  
-        relative_distance_to_bounds_x = torch.abs((origins[:, 0]) - self._robot.data.root_pos_w[: ,0])
-        relative_distance_to_bounds_y = torch.abs((origins[:, 1]) - self._robot.data.root_pos_w[: ,1])
+
+        square_side = self.arena_size
+        relative_distance_to_bounds_x = torch.abs((origins[:, 0]) - self._robot.data.root_pos_w[:, 0])
+        relative_distance_to_bounds_y = torch.abs((origins[:, 1]) - self._robot.data.root_pos_w[:, 1])
         self.distance_to_bounds_x = (square_side / 2) - relative_distance_to_bounds_x
         self.distance_to_bounds_y = (square_side / 2) - relative_distance_to_bounds_y
-        # 3. Action Regularization
 
-        action_diff = self._actions - self._prev_actions  # (num_envs, 4)
+        action_diff = self._actions - self._prev_actions
+        action_reg_diff = torch.norm(action_diff, p=2, dim=-1)
+        action_reg_diff = 1 - torch.tanh(action_reg_diff / 0.8)
 
-        action_reg_diff = torch.norm(action_diff, p=2, dim=-1)  # (num_envs,)
-        action_reg_diff = 1 - torch.tanh(action_reg_diff / 0.8) # (num_envs,)
         is_alive = torch.logical_and(self.distance_to_bounds_x >= 0.0, self.distance_to_bounds_y >= 0.0)
-        life = torch.where(is_alive, 
-                        self.cfg.alive_reward_scale, 
-                        self.cfg.death_reward_scale)
+        life = torch.where(is_alive, self.cfg.alive_reward_scale, self.cfg.death_reward_scale)
 
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -314,7 +412,6 @@ class QuadcopterRnnEnv(DirectRLEnv):
             "life": life * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
-        # Logging
         for key, value in rewards.items():
             self._episode_sums[key] += value
         return reward
@@ -322,52 +419,45 @@ class QuadcopterRnnEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         died = (self._robot.data.root_pos_w[:, 2] < 0.1) | \
-                (self._robot.data.root_pos_w[:, 2] > 2.0) | \
-                (self.distance_to_bounds_x < 0.0) | \
-                (self.distance_to_bounds_y < 0.0)
-        
+               (self._robot.data.root_pos_w[:, 2] > 2.0) | \
+               (self.distance_to_bounds_x < 0.0) | \
+               (self.distance_to_bounds_y < 0.0)
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
 
-        #Update Episode Sums for the reset batch
         num_deaths = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         num_timeouts = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
-        
-        self._episode_sums["died"] += num_deaths   
+
+        self._episode_sums["died"] += num_deaths
         self._episode_sums["time_out"] += num_timeouts
-        #self._episode_sums["world pos z"] += self._robot.data.root_pos_w[:, 2] * self.step_dt
-        #self._episode_sums["distance to bound x"] += self.distance_to_bounds_x * self.step_dt
-        #self._episode_sums["distance to bound y"] += self.distance_to_bounds_y * self.step_dt
 
         self.extras["log"] = dict()
         extras = dict()
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
-            # Separate actual reward components from diagnostic metrics
             if key in ["died", "time_out"]:
                 extras["Episode_Termination/" + key] = episodic_sum_avg / self.max_episode_length_s
             elif key in ["final_distance_to_goal"]:
                 extras["Episode_Info/" + key] = episodic_sum_avg / self.max_episode_length_s
             else:
                 extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
-            self._episode_sums[key][env_ids] = 0.0  # azzerato DOPO aver letto
+            self._episode_sums[key][env_ids] = 0.0
         self.extras["log"].update(extras)
 
-        #RESET DEGLI ENVIRONMENTS
         super()._reset_idx(env_ids)
         if len(env_ids) == self.num_envs:
-            # Spread out the resets to avoid spikes in training when many environments reset at a similar time
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
         self._prev_actions[env_ids] = 0.0
         self._actions[env_ids] = 0.0
+
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
-        # Reset robot state
+
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
@@ -376,10 +466,12 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
-        
+
+        # ── Reset visit counts for terminated envs ────────────────────────────
+        self.global_visit_counts[env_ids] = 0.0
+
     def _set_debug_vis_impl(self, debug_vis: bool):
         pass
 
     def _debug_vis_callback(self, event):
         pass
-
