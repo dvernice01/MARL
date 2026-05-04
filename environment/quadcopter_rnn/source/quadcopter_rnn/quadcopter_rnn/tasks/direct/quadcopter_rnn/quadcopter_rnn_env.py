@@ -69,7 +69,7 @@ def hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200, 100), 
     cx = map_dims[0] // 2
     cy = map_dims[1] // 2
     cz = map_dims[2] // 2
-    ix = ((pts[:, 0] - origin[0]) / grid_size + cx).long()
+    ix = ((pts[:, 0] - origin[0]) / grid_size + cx).long() # che formual è?
     iy = ((pts[:, 1] - origin[1]) / grid_size + cy).long()
     iz = ((pts[:, 2] - origin[2]) / grid_size + cz).long()
     mask = (
@@ -169,8 +169,9 @@ class QuadcopterRnnEnv(DirectRLEnv):
             env_ids = torch.arange(self.num_envs, device=self.device)
 
         pos_w = self._robot.data.root_pos_w[env_ids]  # (E, 3)
-
-        iz = ((pos_w[:, 2] - self.occ_origin[2]) / self.occ_grid_size).long()
+        # RAPPRESENTA SEMPRE LA CONVERSIONE DA WORLD A VOXEL COORDS,
+        # CHE DIPENDE DA ORIGIN E GRID SIZE DELLA MAPPA DI OCCUPANCY
+        iz = ((pos_w[:, 2] - self.occ_origin[2]) / self.occ_grid_size).long() 
         iy = ((pos_w[:, 1] - self.occ_origin[1]) / self.occ_grid_size).long()
         ix = ((pos_w[:, 0] - self.occ_origin[0]) / self.occ_grid_size).long()
 
