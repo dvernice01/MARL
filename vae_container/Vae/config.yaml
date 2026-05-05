@@ -12,8 +12,8 @@ metric:
 
 parameters:
   latent_dim:
-    values: 512
+    values: [512]
   beta_max:
-    values: [50, 70, 100]
+    values: [400, 600, 800, 1000, 1500, 2000]
 
 
