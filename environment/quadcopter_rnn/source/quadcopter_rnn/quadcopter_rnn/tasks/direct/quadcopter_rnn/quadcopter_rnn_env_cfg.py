@@ -108,7 +108,7 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=200, env_spacing=2.5, replicate_physics=True
+        num_envs=3, env_spacing=2.5, replicate_physics=True
     )
 
     # robot

@@ -48,13 +48,14 @@ wandb.login()
 project = "quadcopter_rnn"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-OCCUPANCY_MAP_PATH = "/workspace/environment/quadcopter_rnn/warehouse_3d/occupancy_3d.npy"
-OCCUPANCY_META_PATH = "/workspace/environment/quadcopter_rnn/warehouse_3d/occupancy_3d_meta.npy"
+OCCUPANCY_MAP_PATH = "/workspace/environment/quadcopter_rnn/warehouse_3d_denser/occupancy_3d.npy"
+OCCUPANCY_META_PATH = "/workspace/environment/quadcopter_rnn/warehouse_3d_denser/occupancy_3d_meta.npy"
 LOCAL_MAPS_SAVE_DIR = "/workspace/environment/quadcopter_rnn/outputs/local_maps"
 LOCAL_MAP_SAVE_EVERY = 100   # steps between saves; set to 0 to disable
 LOCAL_NZ = 8                 # local map depth  (z axis)
 LOCAL_NY = 16                # local map height (y axis)
 LOCAL_NX = 16                # local map width  (x axis)
+MIN_ALIVE_STEPS_TO_SAVE = 20 # consecutive alive steps required before saving a map
 
 
 def visualize_occupancy_3d(occ_map: torch.Tensor, save_path: str = "occupancy_map.png"):
@@ -103,7 +104,7 @@ def hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200, 100), 
     )
     ix, iy, iz = ix[mask], iy[mask], iz[mask]
     occ_map = torch.zeros(map_dims, dtype=torch.float32, device=pts.device)
-    occ_map[ix, iy, iz] = 1.0
+    occ_map[iz, iy, ix] = 1.0
     return occ_map
 
 
@@ -218,9 +219,10 @@ class QuadcopterRnnEnv(DirectRLEnv):
         NZ, NY, NX = self.occ_map_dims
         valid = (iz >= 0) & (iz < NZ) & (iy >= 0) & (iy < NY) & (ix >= 0) & (ix < NX)
 
-        for i, e in enumerate(env_ids):
-            if valid[i]:
-                self.global_visit_counts[e, iz[i], iy[i], ix[i]] += 1.0
+        if valid.any():                                                                                                                                                      
+            ve  = env_ids[valid]
+            self.global_visit_counts[ve, iz[valid], iy[valid], ix[valid]] += 1.0
+
 
     # ── SECTION 2: Build local SVS map ────────────────────────────────────────
     def _build_local_svs_map(self, env_id: int) -> torch.Tensor:
