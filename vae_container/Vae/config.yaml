@@ -6,14 +6,19 @@ metric:
   goal: minimize 
   name: val_to_minimize
 
-# parameters:
-#   beta:
-#     values: [20.0, 15.0, 10.0, 5.0]
-
 parameters:
   latent_dim:
-    values: [512]
+    values: [128, 256, 512]
+  num_conv_layers:
+    values: [ 3, 4, 5, 6]  
+  use_residual:
+    values: [true, false]
+  # decoder_num_dense:
+  #   values: [1, 2, 3]
   beta_max:
-    values: [400, 600, 800, 1000, 1500, 2000]
-
+    values: [5.0, 10.0, 20.0]
+  num_deconv_layers:
+    values: [5]
+  residual_every:
+    values: [2]
 

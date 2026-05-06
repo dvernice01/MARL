@@ -6,163 +6,353 @@ class ResidualBlock(nn.Module):
     """
     Residual block that refines features WITHOUT changing shape.
     Input and output are identical in (channels, H, W).
-    Uses: Conv → BN → ELU → Conv → BN → add input → ELU
+    Uses: Relu -> Conv → BN → ELU → Conv → BN → add input → ELU
     """
-    def __init__(self, channels):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.ReLU(),
-            nn.Conv2d(channels, channels, kernel_size=3, padding=1, stride=1, bias=False),
-            nn.BatchNorm2d(channels),
-            nn.ReLU(),
-            nn.Conv2d(channels, channels, kernel_size=3, padding=1, stride=1, bias=False),
-            nn.BatchNorm2d(channels),
-            # NO activation here — applied AFTER addition
-        )
+    def __init__(self, channels, activation=nn.ReLU):
+        super().__init__()                                                                                                                                           
+        act = activation()
+        self.block = nn.Sequential(                                                                                                                                  
+            activation(),          
+            nn.Conv2d(channels, channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),                               
+            activation(),                                                                                                                                            
+            nn.Conv2d(channels, channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),                                                                                                                                
+        )   
 
     def forward(self, x):
         return x + self.block(x)
 
 
 class ImgEncoder(nn.Module):
-    def __init__(self, input_dim, latent_dim):
+    def __init__(self, input_dim, latent_dim,
+                 num_conv_layers=4,
+                 use_residual=True,
+                 residual_every=2):    # ← swept: 1, 2, 3 (every N deep layers)
         super().__init__()
-        self.input_dim  = input_dim
-        self.latent_dim = latent_dim
-        self.relu = nn.ReLU()
-        self._build()
+        self.input_dim       = input_dim
+        self.latent_dim      = latent_dim
+        self.num_conv_layers = num_conv_layers
+        self.use_residual    = use_residual
+        self.residual_every  = residual_every
+        self.relu            = nn.ReLU()
 
-    def _build(self):
-        # Block 0 — no residual, features are simple at this scale
-        self.conv0   = nn.Conv2d(self.input_dim, 32, kernel_size=5, stride=2, padding=2, bias=False)
-        self.bn0     = nn.BatchNorm2d(32)
-        self.conv0_1 = nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1, bias=False)
-        self.bn0_1   = nn.BatchNorm2d(32)
+        self.channel_plan = [
+            (input_dim, 32),
+            (32,        32),
+            (32,        64),
+            (64,        128),
+            (128,       128),
+            (128,       128),
+        ]
 
-        # Block 1 — no residual
-        self.conv1_0      = nn.Conv2d(32, 32, kernel_size=5, stride=2, padding=2, bias=False)
-        self.bn1_0        = nn.BatchNorm2d(32)
-        self.conv1_1      = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1_1        = nn.BatchNorm2d(64)
-        self.conv0_jump_2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1, bias=False)
-        self.bn0_jump_2   = nn.BatchNorm2d(64)
+        # ── Residual block placement ───────────────────────────────────────────
+        # Residuals are only placed in the DEEP half of the network
+        # (shallow layers detect simple features, don't benefit from refinement)
+        # Within the deep half, place one every `residual_every` layers
+        #
+        # Example with num_conv_layers=6, residual_every=2:
+        #   deep half starts at layer 3
+        #   candidates: 3, 4, 5
+        #   every 2: place at 3, 5  → skip layer 4
+        #
+        # Example with num_conv_layers=6, residual_every=3:
+        #   candidates: 3, 4, 5
+        #   every 3: place at 3 only
+        #
+        # Example with num_conv_layers=4, residual_every=1:
+        #   deep half starts at layer 2
+        #   candidates: 2, 3
+        #   every 1: place at 2, 3  → original behavior
 
-        # Block 2 — first residual block added here (128ch, abstract features)
-        self.conv2_0      = nn.Conv2d(64,  64,  kernel_size=5, stride=2, padding=2, bias=False)
-        self.bn2_0        = nn.BatchNorm2d(64)
-        self.conv2_1      = nn.Conv2d(64,  128, kernel_size=3, stride=2, padding=1, bias=False)
-        self.bn2_1        = nn.BatchNorm2d(128)
-        self.conv1_jump_3 = nn.Conv2d(64,  128, kernel_size=5, stride=4, padding=(2,1), bias=False)
-        self.bn1_jump_3   = nn.BatchNorm2d(128)
-        self.res2         = ResidualBlock(128)  # ← first residual block
+        self.residual_at = set()
+        if use_residual and num_conv_layers >= 3:
+            deep_start = num_conv_layers // 2          # first deep layer
+            deep_layers = list(range(deep_start, num_conv_layers))
+            # pick every Nth layer from the deep half
+            self.residual_at = set(
+                deep_layers[i]
+                for i in range(0, len(deep_layers), residual_every)
+            )
 
-        # Block 3 — second residual block (deepest, most abstract)
-        self.conv3_0 = nn.Conv2d(128, 128, kernel_size=5, stride=2, bias=False)
-        self.bn3_0   = nn.BatchNorm2d(128)
-        self.res3    = ResidualBlock(128)       # ← second residual block
+        print(f"  Encoder: {num_conv_layers} conv layers | "
+              f"residual every {residual_every} deep layers | "
+              f"residual at: {sorted(self.residual_at) or 'none'}")
 
-        # Dense — no BN, approaching latent space
-        self.dense0 = nn.Linear(3 * 6 * 128, 512)
+        # ── Build layers ──────────────────────────────────────────────────────
+        self.conv_layers = nn.ModuleList()
+        self.bn_layers   = nn.ModuleList()
+        self.res_blocks  = nn.ModuleDict()
+        self.skip_layers = nn.ModuleDict()
+        self.skip_bn     = nn.ModuleDict()
+
+        for i in range(num_conv_layers):
+            in_ch, out_ch = self.channel_plan[i]
+            stride = 2 if i < 2 else (2 if i % 2 == 0 else 1)
+
+            self.conv_layers.append(
+                nn.Conv2d(in_ch, out_ch, kernel_size=3,
+                          stride=stride, padding=1, bias=False)
+            )
+            self.bn_layers.append(nn.BatchNorm2d(out_ch))
+
+            if i in self.residual_at:
+                self.res_blocks[str(i)] = ResidualBlock(out_ch)
+
+            if i > 0 and i % 2 == 0:
+                prev_ch = self.channel_plan[i - 1][1]
+                if prev_ch != out_ch:
+                    self.skip_layers[str(i)] = nn.Conv2d(
+                        prev_ch, out_ch, kernel_size=1, stride=2, bias=False
+                    )
+                    self.skip_bn[str(i)] = nn.BatchNorm2d(out_ch)
+
+        self.flat_size = self._compute_flat_size()
+        print(f"  Encoder flat size: {self.flat_size}")
+
+        self.dense0 = nn.Linear(self.flat_size, 512)
         self.dense1 = nn.Linear(512, 2 * self.latent_dim)
 
+    def _compute_flat_size(self):
+        with torch.no_grad():
+            dummy = torch.zeros(1, self.input_dim, 270, 480)
+            x = dummy
+            for i, (conv, bn) in enumerate(zip(self.conv_layers, self.bn_layers)):
+                identity = x
+                x = self.relu(bn(conv(x)))
+                if str(i) in self.skip_layers:
+                    skip = self.skip_bn[str(i)](self.skip_layers[str(i)](identity))
+                    x = self.relu(x + skip)
+                if str(i) in self.res_blocks:
+                    x = self.res_blocks[str(i)](x)
+            return x.view(1, -1).shape[1]
+
     def forward(self, img):
-        # Block 0
-        x0_0 = self.relu(self.bn0(self.conv0(img)))
-        x0_1 = self.relu(self.bn0_1(self.conv0_1(x0_0)))
+        x = img
+        for i, (conv, bn) in enumerate(zip(self.conv_layers, self.bn_layers)):
+            identity = x
+            out = bn(conv(x))
+            if str(i) in self.skip_layers:
+                skip = self.skip_bn[str(i)](self.skip_layers[str(i)](identity))
+                x = self.relu(out + skip)
+            else:
+                x = self.relu(out)
 
-        # Block 1
-        x1_0 = self.relu(self.bn1_0(self.conv1_0(x0_1)))
-        x1_1 = self.bn1_1(self.conv1_1(x1_0))
-        x0_j = self.bn0_jump_2(self.conv0_jump_2(x0_1))
-        x1_1 = self.relu(x1_1 + x0_j)
-
-        # Block 2 + first residual
-        x2_0 = self.relu(self.bn2_0(self.conv2_0(x1_1)))
-        x2_1 = self.bn2_1(self.conv2_1(x2_0))
-        x1_j = self.bn1_jump_3(self.conv1_jump_3(x1_1))
-        x2_1 = self.relu(x2_1 + x1_j)
-        x2_1 = self.res2(x2_1)         # refine deep 128ch features
-
-        # Block 3 + second residual
-        x3_0 = self.relu(self.bn3_0(self.conv3_0(x2_1)))
-        x3_0 = self.res3(x3_0)         # refine deepest features
-
-        # Flatten + dense
-        x = x3_0.view(x3_0.size(0), -1)
+            if str(i) in self.res_blocks:
+                x = self.res_blocks[str(i)](x)
+        x = x.view(x.size(0), -1)
         x = self.relu(self.dense0(x))
-        x = self.dense1(x)              # output: [mu | logvar], no BN
-        return x
-
+        return self.dense1(x)
 
 class ImgDecoder(nn.Module):
-    def __init__(self, input_dim=1, latent_dim=64, with_logits=False):
+    def __init__(self, input_dim=1, latent_dim=64, with_logits=False,
+                 num_deconv_layers=5,    # ← swept: 3, 4, 5, 6, 7
+                 use_residual=True,
+                 residual_every=2):
         super().__init__()
-        self.with_logits = with_logits
-        self.n_channels  = input_dim
+        self.with_logits       = with_logits
+        self.n_channels        = input_dim
+        self.num_deconv_layers = num_deconv_layers
+        self.use_residual      = use_residual
+        self.residual_every    = residual_every
         self.elu = nn.ELU()
 
-        # Dense — no BN, input is sampled latent z
+        # ── Dense layers — FIXED, identical to original ────────────────────────
         self.dense0 = nn.Linear(latent_dim, 512)
         self.dense1 = nn.Linear(512, 1024)
         self.dense2 = nn.Linear(1024, 9 * 15 * 128)
 
-        # One residual block right at the bottleneck
-        # This is where spatial structure first appears
-        # and needs the most refinement
-        self.res_bottleneck = ResidualBlock(128)  # ← only one
+        # ── Deconv layer pool — all possible layers in order ───────────────────
+        # Each entry: (in_ch, out_ch, kernel, stride, padding, output_padding)
+        # The full sequence goes from (128, 9, 15) → (1, 270, 480)
+        # We define MORE layers than needed and select a subset based on depth.
+        #
+        # Spatial progression (full 7-layer version):
+        # start:    (128,  9,  15)
+        # deconv0:  (128,  9,  15)  stride=1  refinement
+        # deconv1:  (128, 17,  30)  stride=2  x2
+        # deconv2:  ( 64, 17,  30)  stride=1  refinement + channel reduction
+        # deconv3:  ( 64, 34,  60)  stride=2  x2
+        # deconv4:  ( 32, 34,  60)  stride=1  refinement + channel reduction
+        # deconv5:  ( 16,135, 241)  stride=4  x4 (big jump to near-final res)
+        # deconv6:  (  1,270, 480)  stride=2  final output
+        #
+        # For fewer layers we skip refinement layers and use larger strides
+        # to still reach (270, 480) from (9, 15).
 
-        # Upsampling layers with BN
-        self.deconv1 = nn.Sequential(
-            nn.ConvTranspose2d(128, 128, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.ELU(),
-        )
-        self.deconv2 = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=5, stride=2,
-                               padding=(2,2), output_padding=(0,1), bias=False),
-            nn.BatchNorm2d(64),
-            nn.ELU(),
-        )
-        self.deconv4 = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, kernel_size=6, stride=4,
-                               padding=(2,2), output_padding=(0,0), bias=False),
-            nn.BatchNorm2d(32),
-            nn.ELU(),
-        )
-        self.deconv6 = nn.Sequential(
-            nn.ConvTranspose2d(32, 16, kernel_size=6, stride=2,
-                               padding=(0,0), output_padding=(0,1), bias=False),
-            nn.BatchNorm2d(16),
-            nn.ELU(),
-        )
-        # Final output — no BN, sigmoid handles range
-        self.deconv7 = nn.ConvTranspose2d(
-            16, self.n_channels, kernel_size=4, stride=2, padding=2
-        )
+        self.ALL_DECONV_CFGS = {
+            # key = num_deconv_layers → list of (in_ch, out_ch, k, s, pad, out_pad)
+            3: [
+                # aggressive — must cover 9→270 (x30) and 15→480 (x32) in 2 steps + final
+                (128, 64, 6, 4, 1, (0, 0)),    # (64,  34,  60)   x4
+                ( 64, 16, 6, 4, 0, (0, 1)),    # (16, 135, 241)   x4
+                ( 16,  1, 4, 2, 2, (0, 0)),    # (1,  270, 480)   x2  final
+            ],
+            4: [
+                (128, 64, 5, 2, 2, (0, 1)),    # (64,  17,  30)   x2
+                ( 64, 32, 6, 4, 2, (0, 0)),    # (32,  68, 120)   x4
+                ( 32, 16, 6, 2, 0, (0, 1)),    # (16, 135, 241)   x2
+                ( 16,  1, 4, 2, 2, (0, 0)),    # (1,  270, 480)   x2  final
+            ],
+            5: [
+                # original architecture
+                (128, 128, 3, 1, 1, (0, 0)),   # (128,  9,  15)   refinement
+                (128,  64, 5, 2, 2, (0, 1)),   # (64,  17,  30)   x2
+                ( 64,  32, 6, 4, 2, (0, 0)),   # (32,  68, 120)   x4
+                ( 32,  16, 6, 2, 0, (0, 1)),   # (16, 135, 241)   x2
+                ( 16,   1, 4, 2, 2, (0, 0)),   # (1,  270, 480)   x2  final
+            ],
+            6: [
+                (128, 128, 3, 1, 1, (0, 0)),   # (128,  9,  15)   refinement
+                (128,  64, 5, 2, 2, (0, 1)),   # (64,  17,  30)   x2
+                ( 64,  64, 3, 1, 1, (0, 0)),   # (64,  17,  30)   refinement
+                ( 64,  32, 6, 4, 2, (0, 0)),   # (32,  68, 120)   x4
+                ( 32,  16, 6, 2, 0, (0, 1)),   # (16, 135, 241)   x2
+                ( 16,   1, 4, 2, 2, (0, 0)),   # (1,  270, 480)   x2  final
+            ],
+            7: [
+                (128, 128, 3, 1, 1, (0, 0)),   # (128,  9,  15)   refinement
+                (128,  64, 5, 2, 2, (0, 1)),   # (64,  17,  30)   x2
+                ( 64,  64, 3, 1, 1, (0, 0)),   # (64,  17,  30)   refinement
+                ( 64,  32, 6, 4, 2, (0, 0)),   # (32,  68, 120)   x4
+                ( 32,  32, 3, 1, 1, (0, 0)),   # (32,  68, 120)   refinement
+                ( 32,  16, 6, 2, 0, (0, 1)),   # (16, 135, 241)   x2
+                ( 16,   1, 4, 2, 2, (0, 0)),   # (1,  270, 480)   x2  final
+            ],
+        }
+
+        if num_deconv_layers not in self.ALL_DECONV_CFGS:
+            raise ValueError(
+                f"num_deconv_layers={num_deconv_layers} not supported. "
+                f"Choose from {list(self.ALL_DECONV_CFGS.keys())}"
+            )
+
+        deconv_cfgs = self.ALL_DECONV_CFGS[num_deconv_layers]
+
+        # ── Residual placement — only on non-final upsample layers ────────────
+        # skip refinement layers (stride=1) and final output layer
+        upsample_idxs = [
+            i for i, (_, _, _, s, _, _) in enumerate(deconv_cfgs)
+            if s > 1 and i < len(deconv_cfgs) - 1   # not final
+        ]
+        self.residual_at = set()
+        if use_residual and len(upsample_idxs) > 0:
+            self.residual_at = set(
+                upsample_idxs[i]
+                for i in range(0, len(upsample_idxs), residual_every)
+            )
+
+        print(f"  Decoder: {num_deconv_layers} deconv layers | "
+              f"residual at: {sorted(self.residual_at) or 'none'}")
+
+        # ── Build layers ──────────────────────────────────────────────────────
+        self.deconv_layers = nn.ModuleList()
+        self.deconv_bn     = nn.ModuleList()
+        self.res_blocks    = nn.ModuleDict()
+        self.skip_layers   = nn.ModuleDict()
+        self.skip_bn       = nn.ModuleDict()
+
+        for i, (in_ch, out_ch, k, s, p, op) in enumerate(deconv_cfgs):
+            is_final = (i == len(deconv_cfgs) - 1)
+
+            self.deconv_layers.append(
+                nn.ConvTranspose2d(in_ch, out_ch, kernel_size=k,
+                                   stride=s, padding=p,
+                                   output_padding=op, bias=False)
+            )
+            # no BN on final layer — sigmoid handles normalization
+            self.deconv_bn.append(
+                nn.BatchNorm2d(out_ch) if not is_final else nn.Identity()
+            )
+
+            if i in self.residual_at:
+                self.res_blocks[str(i)] = ResidualBlock(out_ch, activation=nn.ELU)
+
+            # skip connection when channels change and not final
+            if in_ch != out_ch and s > 1 and not is_final:                                                                                                                       
+                op_h = op[0] + (k - 1) - 2 * p                                                                                                                                   
+                op_w = op[1] + (k - 1) - 2 * p
+                if 0 <= op_h < s and 0 <= op_w < s:                                                                                                                              
+                    skip_k, skip_p, skip_op = 1, 0, (op_h, op_w)
+                else:                                                                                                                                                            
+                    skip_k, skip_p, skip_op = k, p, op  # fallback: same kernel as main
+                self.skip_layers[str(i)] = nn.ConvTranspose2d(                                                                                                                   
+                    in_ch, out_ch, kernel_size=skip_k,                                                                                                                           
+                    stride=s, padding=skip_p, output_padding=skip_op, bias=False
+                )                                                                                                                                                                
+                self.skip_bn[str(i)] = nn.BatchNorm2d(out_ch) 
+
+        # ── Verify output size ────────────────────────────────────────────────
+        self._verify_output_size()
+
+    def _verify_output_size(self):
+        """Sanity check — confirm we reach exactly (1, 270, 480)."""
+        with torch.no_grad():
+            dummy = torch.zeros(1, 128, 9, 15)
+            x = dummy
+            for i, (deconv, bn) in enumerate(
+                zip(self.deconv_layers, self.deconv_bn)
+            ):
+                identity = x
+                out = deconv(x)
+                out = bn(out)
+
+                if str(i) in self.skip_layers:
+                    skip = self.skip_bn[str(i)](
+                        self.skip_layers[str(i)](identity)
+                    )
+                    x = out + skip
+                else:
+                    x = out
+
+                if i < len(self.deconv_layers) - 1:
+                    x = torch.nn.functional.elu(x)
+
+                if str(i) in self.res_blocks:
+                    x = self.res_blocks[str(i)](x)
+
+        expected = (1, 1, 270, 480)
+        if tuple(x.shape) != expected:
+            raise RuntimeError(
+                f"Decoder output shape {tuple(x.shape)} != {expected}. "
+                f"Fix the deconv configs for num_deconv_layers={self.num_deconv_layers}."
+            )
+        print(f"  Decoder output verified: {tuple(x.shape)} ✅")
 
     def forward(self, z):
-        # Dense expansion — no BN
+        # fixed dense expansion — identical to original
         x = self.elu(self.dense0(z))
         x = self.elu(self.dense1(x))
         x = self.elu(self.dense2(x))
         x = x.view(x.size(0), 128, 9, 15)
 
-        # Residual refinement at bottleneck — hardest transition
-        x = self.res_bottleneck(x)
+        # variable deconv
+        for i, (deconv, bn) in enumerate(
+            zip(self.deconv_layers, self.deconv_bn)
+        ):
+            is_final = (i == len(self.deconv_layers) - 1)
+            identity = x
+            out = deconv(x)
+            out = bn(out)
 
-        # Upsample to full resolution
-        x = self.deconv1(x)
-        x = self.deconv2(x)
-        x = self.deconv4(x)
-        x = self.deconv6(x)
+            if str(i) in self.skip_layers:
+                skip = self.skip_bn[str(i)](
+                    self.skip_layers[str(i)](identity)
+                )
+                x = out + skip
+            else:
+                x = out
+            
+            if not is_final:
+                x = self.elu(x)
 
-        # Final output — no BN, no activation before sigmoid
-        x = self.deconv7(x)
+            if str(i) in self.res_blocks:
+                x = self.res_blocks[str(i)](x)
+
         if self.with_logits:
             return x
         return torch.sigmoid(x)
-
-
+    
 class Lambda(nn.Module):
     def __init__(self, func):
         super().__init__()
@@ -170,18 +360,37 @@ class Lambda(nn.Module):
 
     def forward(self, x):
         return self.func(x)
-
+    
 
 class VAE(nn.Module):
-    def __init__(self, input_dim=1, latent_dim=64, with_logits=False, inference_mode=False):
+    def __init__(self, input_dim=1, latent_dim=64, with_logits=False,
+                 inference_mode=False,
+                 num_conv_layers=4,      # ← swept
+                 use_residual=True,
+                 residual_every=2,
+                 num_deconv_layers=5):   # ← swept
+        
         super().__init__()
-        self.with_logits     = with_logits
-        self.input_dim       = input_dim
-        self.latent_dim      = latent_dim
-        self.inference_mode  = inference_mode
+        self.with_logits    = with_logits
+        self.input_dim      = input_dim
+        self.latent_dim     = latent_dim
+        self.inference_mode = inference_mode
 
-        self.encoder     = ImgEncoder(input_dim=input_dim, latent_dim=latent_dim)
-        self.img_decoder = ImgDecoder(input_dim=1, latent_dim=latent_dim, with_logits=with_logits)
+        self.encoder = ImgEncoder(
+            input_dim       = input_dim,
+            latent_dim      = latent_dim,
+            num_conv_layers = num_conv_layers,
+            use_residual    = use_residual,
+            residual_every   = residual_every,
+        )
+        self.img_decoder = ImgDecoder(
+            input_dim        = 1,
+            latent_dim       = latent_dim,
+            with_logits      = with_logits,
+            num_deconv_layers = num_deconv_layers,  
+            use_residual     = use_residual,
+            residual_every   = residual_every,
+        )
 
         self.mean_params   = Lambda(lambda x: x[:, :latent_dim])
         self.logvar_params = Lambda(lambda x: x[:, latent_dim:])
@@ -217,30 +426,3 @@ class VAE(nn.Module):
     def set_inference_mode(self, mode):
         self.inference_mode = mode
 
-
-# # LIKE THE FIGURE
-
-# class ImgEncoder(nn.Module):
-#     def __init__(self, input_dim, latent_dim):
-#         super().__init__()
-#         self.latent_dim = latent_dim
-
-#         self.conv1 = nn.Conv2d(input_dim, 64, kernel_size=3, stride=1, padding=1, bias=False)
-#         self.pool  = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-#         self.res1  = ResidualBlock(64)
-#         self.res2  = ResidualBlock(64)
-
-#         self.flatten = nn.Flatten()
-#         # Adjust input size to match your spatial dims after pooling
-#         self.dense0 = nn.Linear(64 * H * W, 512)  # replace H, W accordingly
-#         self.dense1 = nn.Linear(512, 2 * latent_dim)
-#         self.relu   = nn.ReLU()
-
-#     def forward(self, img):
-#         x = self.relu(self.conv1(img))
-#         x = self.pool(x)
-#         x = self.res1(x)
-#         x = self.res2(x)
-#         x = self.flatten(x)
-#         x = self.relu(self.dense0(x))
-#         return self.dense1(x)
