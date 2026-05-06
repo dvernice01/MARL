@@ -12,7 +12,24 @@ import wandb
 import yaml
 import random
 
-MAX_DEPTH = 10.0
+MAX_DEPTH = 10.0                                                                                                                                                                  
+SEED = 42                                                                                                                                                            
+                                                                                                                                                                    
+random.seed(SEED)                                                                                                                                                    
+np.random.seed(SEED)                                                                                                                                                 
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark     = False   
+
+def seed_worker(worker_id):                                                                                                                                          
+    worker_seed = SEED + worker_id                                                                                                                                   
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)                                                                                                                                         
+                
+g = torch.Generator()
+g.manual_seed(SEED)
+
 
 # ── DATASETS ──────────────────────────────────────────────────────────────────
 
@@ -145,8 +162,8 @@ def make_isaaclab_loaders(data_dir, val_ratio=0.1, batch_size=32,
     train_set.dataset.augment = True
     print(f"  Train: {n_train} | Val: {n_val}")
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,  num_workers=num_workers, pin_memory=True)
-    val_loader   = DataLoader(val_set,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,  num_workers=num_workers, pin_memory=True, worker_init_fn=seed_worker)
+    val_loader   = DataLoader(val_set,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, worker_init_fn=seed_worker)
     return train_loader, val_loader
 
 
@@ -158,7 +175,7 @@ def make_warehouse_loader(base_dir, batch_size=32, num_workers=2, target_size=(2
         target_size   = target_size,
     )
     return DataLoader(dataset, batch_size=batch_size, shuffle=False,
-                      num_workers=num_workers, pin_memory=True)
+                      num_workers=num_workers, pin_memory=True, worker_init_fn=seed_worker)
 
 
 # ── LOSS ──────────────────────────────────────────────────────────────────────
@@ -192,14 +209,15 @@ def dce_loss(recon, target, valid_mask, mean, logvar, beta=3.0):
 # ── LATENCY MEASUREMENT ───────────────────────────────────────────────────────
 
 def measure_latency(model, device, input_size=(1, 1, 270, 480),
-                    n_warmup=10, n_runs=100):
+                    n_warmup=10, n_runs=100, input_tensor=None):                                                                                                     
+
     """
     Measures forward pass latency in milliseconds.
     Returns mean and std over n_runs.
     Uses CUDA events for GPU timing (much more accurate than time.time()).
     """
-    model.eval()
-    dummy = torch.randn(input_size, device=device)
+    model.eval()                                                
+    dummy = input_tensor if input_tensor is not None else torch.randn(input_size, device=device)
 
     # warmup — first runs are always slower due to CUDA JIT
     with torch.no_grad():
@@ -295,7 +313,7 @@ def run_test(model, test_loader, device, beta):
             masks   = masks.to(device)
 
             recon, mean, logvar, _ = model(inputs)
-            loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
+            loss, recon_l, kl_l = dce_loss(recon, inputs, masks, mean, logvar, beta=beta)
 
             test_loss       += loss.item()
             test_recon_loss += recon_l.item()
@@ -362,9 +380,9 @@ def main():
         optimizer, mode='min', factor=0.5, patience=15, verbose=True
     )
 
-    epochs        = 200
+    epochs        = 150
     beta_schedule = build_beta_schedule(
-        warmup_end = 200,
+        warmup_end = 100,
         beta_max   = cfg.beta_max,
         total_epochs = epochs,
     )
@@ -391,7 +409,7 @@ def main():
             inputs, labels, masks = inputs.to(device), labels.to(device), masks.to(device)
             optimizer.zero_grad()
             recon, mean, logvar, _ = model(inputs)
-            loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
+            loss, recon_l, kl_l = dce_loss(recon, inputs, masks, mean, logvar, beta=beta)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -412,7 +430,7 @@ def main():
             for inputs, labels, masks in val_loader:
                 inputs, labels, masks = inputs.to(device), labels.to(device), masks.to(device)
                 recon, mean, logvar, _ = model(inputs)
-                loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
+                loss, recon_l, kl_l = dce_loss(recon, inputs, masks, mean, logvar, beta=beta)
                 val_loss  += loss.item()
                 val_recon += recon_l.item()
                 val_kl    += kl_l.item()
@@ -457,7 +475,7 @@ def main():
             os.makedirs(ckpt_dir, exist_ok=True)
             ckpt_path = os.path.join(ckpt_dir, f"vae_best_{timestamp}.pt")
             torch.save(model.state_dict(), ckpt_path)
-            print(f"  ✅ Saved best model (val={val_loss:.4f}) → {ckpt_path}")
+            print(f"  Saved best model (val={val_loss:.4f}) → {ckpt_path}")
             wandb.run.summary["best_val_loss"] = best_val_loss
             wandb.run.summary["best_checkpoint"] = ckpt_path
 
@@ -472,16 +490,20 @@ def main():
     test_metrics = run_test(model, test_loader, device, beta= 0.0)
 
     vis_dir_test = os.path.join(run_dir, "visualizations_test")
-    visualize(model, test_loader.dataset, device, epoch="test", save_dir=vis_dir_test)
+    for i in range(5):                                                                                                                                                   
+        visualize(model, test_loader.dataset, device, epoch=f"test_{i}", save_dir=vis_dir_test)
 
-    # measure latency
-    latency_metrics = measure_latency(
-        model,
-        device,
-        input_size = (1, 1, 270, 480),
-        n_warmup   = 20,
-        n_runs     = 200,
-    )
+    rand_idx = random.randint(0, len(test_loader.dataset) - 1)                                                                                                           
+    sample_depth, _, _ = test_loader.dataset[rand_idx]
+    real_input = sample_depth.unsqueeze(0).to(device)                                                                                           
+                                                                        
+    latency_metrics = measure_latency(                                                                                                                                   
+        model,                        
+        device,                                                                                                                                                          
+        input_tensor = real_input,
+        n_warmup     = 20,        
+        n_runs       = 100,
+    )  
 
     print("Test metrics:")
     for k, v in test_metrics.items():

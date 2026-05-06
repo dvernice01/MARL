@@ -16,7 +16,7 @@ parameters:
   # decoder_num_dense:
   #   values: [1, 2, 3]
   beta_max:
-    values: [5.0, 10.0, 20.0]
+    values: [40, 100, 200, 500, 1000, 2000, 5000]
   num_deconv_layers:
     values: [5]
   residual_every:
