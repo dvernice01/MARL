@@ -253,7 +253,8 @@ def visualize(model, dataset, device, epoch, save_dir='debug_epochs'):
         for col in range(3):
             idx = indices[col]
             depth_t, coll_t, mask_t = dataset[idx]
-            recon, *_ = model(coll_t.unsqueeze(0).to(device))
+            recon, *_ = model(depth_t.unsqueeze(0).to(device)) # PER ADESSO LO STO TESTANDO SU DEPTH
+            #recon, *_ = model(coll_t.unsqueeze(0).to(device))
             for row, arr in enumerate([
                 depth_t.squeeze().numpy(),
                 coll_t.squeeze().numpy(),
@@ -267,7 +268,7 @@ def visualize(model, dataset, device, epoch, save_dir='debug_epochs'):
 
     plt.suptitle(f'Epoch {epoch}')
     plt.tight_layout()
-    path = os.path.join(save_dir, f'epoch_{epoch:03d}.png')
+    path = os.path.join(save_dir, f'epoch_{epoch}.png')
     plt.savefig(path, dpi=120)
     plt.close()
 
@@ -372,8 +373,8 @@ def main():
     writer = SummaryWriter(os.path.join(run_dir, "tensorboard"))
 
     # ── initial visualization ─────────────────────────────────────────────────
-    vis_dir = os.path.join(run_dir, "visualizations")
-    visualize(model, val_data, device, epoch=0, save_dir=vis_dir)
+    vis_dir_test = os.path.join(run_dir, "visualizations_train")
+    visualize(model, val_data, device, epoch=0, save_dir=vis_dir_test)
 
     best_val_loss = float('inf')
     timestamp     = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -447,7 +448,7 @@ def main():
 
         # ── periodic visualization ────────────────────────────────────────────
         if epoch % 10 == 0 or epoch == epochs:
-            visualize(model, val_data, device, epoch, save_dir=vis_dir)
+            visualize(model, val_data, device, epoch, save_dir=vis_dir_test)
 
         # ── checkpoint ────────────────────────────────────────────────────────
         if val_loss < best_val_loss:
@@ -469,6 +470,10 @@ def main():
 
     #test_metrics = run_test(model, test_loader, device, beta=float(beta_schedule[-1]))
     test_metrics = run_test(model, test_loader, device, beta= 0.0)
+
+    vis_dir_test = os.path.join(run_dir, "visualizations_test")
+    visualize(model, test_loader.dataset, device, epoch="test", save_dir=vis_dir_test)
+
     # measure latency
     latency_metrics = measure_latency(
         model,
