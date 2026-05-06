@@ -124,6 +124,9 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
         self.rel_pos_b = torch.zeros(self.num_envs, 3, device=self.device)
 
+        # consecutive steps each env has been alive (gates map saving)
+        self.alive_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  
+
         self.x_min = -28.0
         self.x_max = 8.0
         self.y_min = -41.4
@@ -303,16 +306,16 @@ class QuadcopterRnnEnv(DirectRLEnv):
         """
         local_svs = self._build_local_svs_map(env_id)   # (8, 16, 16)
         local_occ = self._build_local_occ_map(env_id)   # (8, 16, 16)
-        return torch.stack([local_svs, local_occ], dim=0)  # (2, 8, 16, 16)
+        return torch.stack([local_occ, local_svs], dim=0)  # (2, 8, 16, 16)
 
     # ── SECTION 5: Save combined maps ─────────────────────────────────────────
-    def _save_local_maps(self):
-        """Save combined (2, 8, 16, 16) maps for all envs to disk."""
-        step = self.common_step_counter
-        for env_id in range(self.num_envs):
-            combined = self._build_local_combined_map(env_id)  # (2, n, n, n)
-            path = os.path.join(LOCAL_MAPS_SAVE_DIR, f"env{env_id}_step{step}.npy")
-            np.save(path, combined.cpu().numpy())
+    def _save_local_maps(self, env_ids: torch.Tensor):                                                                                                                   
+        """Save combined (2, 8, 16, 16) maps for alive envs to disk."""
+        step = self.common_step_counter                                                                                                                                  
+        for env_id in env_ids.tolist():
+            combined = self._build_local_combined_map(env_id)                                                                                                            
+            path = os.path.join(LOCAL_MAPS_SAVE_DIR, f"env{env_id}_step{step}.npy")                                                                                      
+            np.save(path, combined.cpu().numpy()) 
 
     def _load_policy_network(self):
         checkpoint = torch.load(
@@ -395,8 +398,23 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self._update_visit_counts()
 
         # ── Save combined maps periodically ───────────────────────────────────
-        if LOCAL_MAP_SAVE_EVERY > 0 and self.common_step_counter % LOCAL_MAP_SAVE_EVERY == 0:
-            self._save_local_maps()
+        origins = self.scene.env_origins                                                                                                                                     
+        pos_w   = self._robot.data.root_pos_w
+        local_x = pos_w[:, 0] - origins[:, 0]                                                                                                                                
+        local_y = pos_w[:, 1] - origins[:, 1]                                                                                                                                
+        is_alive = (                                                                                                                                                         
+            (local_x > self.x_min) & (local_x < self.x_max) &                                                                                                                
+            (local_y > self.y_min) & (local_y < self.y_max) &
+            (pos_w[:, 2] > self.z_min) & (pos_w[:, 2] < self.z_max)                                                                                                          
+        )                                                          
+        self.alive_steps[is_alive]  += 1                                                                                                                                     
+        self.alive_steps[~is_alive] = 0 
+                                                                                                                                                                            
+        # ── Save maps periodically — only for envs alive long enough ──────────
+        if LOCAL_MAP_SAVE_EVERY > 0 and self.common_step_counter % LOCAL_MAP_SAVE_EVERY == 0:                                                                                
+            eligible = (self.alive_steps >= MIN_ALIVE_STEPS_TO_SAVE).nonzero(as_tuple=False).view(-1)
+            if eligible.numel() > 0:                                                                                                                                         
+                self._save_local_maps(eligible) 
 
         self.rel_pos_b, _ = subtract_frame_transforms(
             self._robot.data.root_pos_w,
@@ -494,6 +512,7 @@ class QuadcopterRnnEnv(DirectRLEnv):
 
         self._prev_actions[env_ids] = 0.0
         self._actions[env_ids] = 0.0
+        self.alive_steps[env_ids] = 0.0
 
         self._desired_pos_w[env_ids, 0] = torch.zeros_like(self._desired_pos_w[env_ids, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
         self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(self.y_min + 1.0, self.y_max - 1.0)

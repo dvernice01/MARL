@@ -19,7 +19,8 @@ environment/QuadcopterVae/wandb/
 environment/QuadcopterVae/logs/
 environment/QuadcopterVae/outputs/
 warehouse_detection_dataset/
-environment/warehouse_3d/
+environment/quadcopter_rnn/warehouse_3d/
+environment/quadcopter_rnn/warehouse_3d_denser/
 
 # --- Simulation & Video (Isaac Lab / Isaac Sim) ---
 _isaac_sim/

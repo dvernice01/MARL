@@ -30,7 +30,7 @@ from isaaclab.utils.math import transform_points, unproject_depth, quat_inv, qua
 import matplotlib.pyplot as plt
 import numpy as np
 import os
-from .VAE import VAE
+from .vae_residual_batch import VAE
 import inspect
 print("VAE loaded from:", inspect.getfile(VAE))
 from tqdm import tqdm
@@ -61,7 +61,7 @@ class vae_config:
     latent_dims = 512
     #032824
     model_file = (
-        "/workspace/vae_container/Vae/checkpoint/vae_best_20260423_035418.pt"
+        "/workspace/vae_container/Vae/checkpoint/vae_best_20260505_055654.pt"
     )
     model_folder = "/workspace/vae_container/Vae/checkpoint"
     image_res = (270, 480)

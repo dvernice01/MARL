@@ -85,6 +85,7 @@ def plot_3d_voxels(data: np.ndarray, title_prefix: str, save_path: str | None = 
     ax1 = fig.add_subplot(121, projection="3d")
     iz, iy, ix = np.where(occ > 0.5)
     ax1.scatter(ix, iy, iz, s=2, c="red", alpha=0.4)
+    ax1.set_box_aspect([16, 16, 8]) 
     ax1.set_title("Occupancy (occupied voxels)")
     ax1.set_xlabel("x"); ax1.set_ylabel("y"); ax1.set_zlabel("z")
 
@@ -94,6 +95,7 @@ def plot_3d_voxels(data: np.ndarray, title_prefix: str, save_path: str | None = 
     iz, iy, ix = np.where(svs > threshold)
     vals = svs[iz, iy, ix]
     sc = ax2.scatter(ix, iy, iz, s=2, c=vals, cmap="viridis", alpha=0.5)
+    ax2.set_box_aspect([16, 16, 8]) 
     fig.colorbar(sc, ax=ax2, shrink=0.5, label="entropy")
     ax2.set_title("SVS — visit entropy")
     ax2.set_xlabel("x"); ax2.set_ylabel("y"); ax2.set_zlabel("z")
@@ -111,8 +113,7 @@ def plot_center_cross_sections(data: np.ndarray, title_prefix: str, save_path: s
     """
     Show XY, XZ, YZ cross-sections through the cube center for both channels.
     """
-    n = data.shape[1]
-    mid = n // 2
+    nz, ny, nx = data.shape[1], data.shape[2], data.shape[3]
     channel_names = ["Occupancy", "SVS"]
     channel_cmaps = ["Reds", "viridis"]
     plane_names   = ["XY (top-down)", "XZ (front)", "YZ (side)"]
@@ -122,7 +123,7 @@ def plot_center_cross_sections(data: np.ndarray, title_prefix: str, save_path: s
 
     for row, (ch_name, cmap) in enumerate(zip(channel_names, channel_cmaps)):
         ch = data[row]
-        slices = [ch[mid, :, :], ch[:, mid, :], ch[:, :, mid]]
+        slices = [ch[nz//2, :, :], ch[:, ny//2, :], ch[:, :, nx//2]]
         for col, (sl, plane) in enumerate(zip(slices, plane_names)):
             ax = axes[row, col]
             im = ax.imshow(sl, origin="lower", cmap=cmap, interpolation="nearest")
