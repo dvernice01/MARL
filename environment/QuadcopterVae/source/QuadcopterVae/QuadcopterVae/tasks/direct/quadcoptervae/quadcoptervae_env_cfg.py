@@ -53,7 +53,7 @@ class QuadcoptervaeEnvWindow(BaseEnvWindow):
 @configclass
 class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 50.0
+    episode_length_s = 200.0
     decimation= 10
     decimation_low_level = 2
     action_space = 4

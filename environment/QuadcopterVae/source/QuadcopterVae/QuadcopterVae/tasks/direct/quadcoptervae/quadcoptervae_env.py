@@ -500,6 +500,14 @@ class QuadcoptervaeEnv(DirectRLEnv):
         self.accum_reward = 0.0
         self.accum_counter = 0.0
 
+        self.x_min = -28.0
+        self.x_max = 8.0
+        self.y_min = -41.4
+        self.y_max = 33.42
+        self.z_min = 0.0
+        self.z_max = 9.30
+        
+
         # Reward massimo teorico per episodio (per normalizzare)
         max_theoretical_reward = self.cfg.alive_reward_scale * self.cfg.distance_to_goal_reward_scale * self.max_episode_length_s
         self.policy_network = self._load_policy_network()
@@ -559,13 +567,13 @@ class QuadcoptervaeEnv(DirectRLEnv):
         
         self._actions = actions.clone().clamp(-1.0, 1.0)
 
-        # self.target_vel_cmd[:,:3] = self._actions[:, :3]
-        # self.target_yaw_cmd = self._actions[:, 3]
-        vel_zero = torch.zeros(self.num_envs, 4, device=self.device)
-        #vel_zero[:,3] = 0.3
-        vel_zero[:,0] = 1.0
-        self.target_vel_cmd[:,:3] = vel_zero[:,:3]
-        self.target_yaw_cmd = vel_zero[:,3]
+        self.target_vel_cmd[:,:3] = self._actions[:, :3]
+        self.target_yaw_cmd = self._actions[:, 3]
+        # vel_zero = torch.zeros(self.num_envs, 4, device=self.device)
+        # #vel_zero[:,3] = 0.3
+        # vel_zero[:,0] = 1.0
+        # self.target_vel_cmd[:,:3] = vel_zero[:,:3]
+        # self.target_yaw_cmd = vel_zero[:,3]
 
 
     def _apply_action(self):
@@ -654,6 +662,7 @@ class QuadcoptervaeEnv(DirectRLEnv):
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
+
         origins = self.scene.env_origins
         lin_vel_sum = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel_sum = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
@@ -729,19 +738,28 @@ class QuadcoptervaeEnv(DirectRLEnv):
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
         self._actions[env_ids] = 0.0
-
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-15.0, 15.0)
+        self._desired_pos_w[env_ids, 0] = torch.zeros_like(self._desired_pos_w[env_ids, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
+        #self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(self.y_min + 1.0, self.y_max - 1.0)
+        self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(0.0, self.y_max - 1.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 5.0)
+        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(self.z_min + 1.0, self.z_max - 1.0)
+
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
+        # default_root_state = self._robot.data.default_root_state[env_ids]
+        # default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        # default_root_state[:, 0] = -4.0
+        # default_root_state[:, 1] = -2.0
+        # default_root_state[:, 2] = 2.0
+        # default_root_state[:, -1] = 90
         default_root_state = self._robot.data.default_root_state[env_ids]
-        default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        default_root_state[:, 0] = -4.0
-        default_root_state[:, 1] = -2.0
-        default_root_state[:, 2] = 2.0
-        default_root_state[:, -1] = 90
+        default_root_state[:, 0] = torch.zeros_like(default_root_state[:, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
+        #self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(self.y_min + 1.0, self.y_max - 1.0)
+        default_root_state[:, 1] = torch.zeros_like(default_root_state[:, 1]).uniform_(0.0, self.y_max - 1.0)
+        default_root_state[:, :2] += self._terrain.env_origins[env_ids, :2]
+        default_root_state[:, 2] = torch.zeros_like(default_root_state[:, 2]).uniform_(self.z_min + 1.0, self.z_max - 1.0)
+
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)

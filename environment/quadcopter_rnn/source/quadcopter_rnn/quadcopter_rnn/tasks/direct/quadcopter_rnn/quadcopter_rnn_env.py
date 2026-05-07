@@ -56,6 +56,7 @@ LOCAL_NZ = 8                 # local map depth  (z axis)
 LOCAL_NY = 16                # local map height (y axis)
 LOCAL_NX = 16                # local map width  (x axis)
 MIN_ALIVE_STEPS_TO_SAVE = 20 # consecutive alive steps required before saving a map
+LOCAL_MAP_START_STEP = 30000
 
 
 def visualize_occupancy_3d(occ_map: torch.Tensor, save_path: str = "occupancy_map.png"):
@@ -207,6 +208,13 @@ class QuadcopterRnnEnv(DirectRLEnv):
             save_path="/workspace/environment/quadcopter_rnn/outputs/global_occupancy_3d.png"
         )
 
+        iz_occ, iy_occ, ix_occ = torch.where(self.global_occ_map == 2)                                                     
+        self.occupied_pos_w = torch.stack([                                                                                  
+            ix_occ * self.occ_grid_size + self.occ_origin[0],
+            iy_occ * self.occ_grid_size + self.occ_origin[1],                                                                
+            iz_occ * self.occ_grid_size + self.occ_origin[2],                                                                
+        ], dim=1)  # (N, 3) — local warehouse coords 
+
     # ── SECTION 2: Update visit counts (call every step) ──────────────────────
     def _update_visit_counts(self, env_ids: torch.Tensor | None = None):
         """Increment the visit count voxel at each drone's current position."""
@@ -214,6 +222,8 @@ class QuadcopterRnnEnv(DirectRLEnv):
             env_ids = torch.arange(self.num_envs, device=self.device)
 
         pos_w = self._robot.data.root_pos_w[env_ids]  # (E, 3)
+        env_origins = self.scene.env_origins[env_ids]                                                                        
+        local_pos = pos_w - env_origins 
 
         iz = ((pos_w[:, 2] - self.occ_origin[2]) / self.occ_grid_size).long()
         iy = ((pos_w[:, 1] - self.occ_origin[1]) / self.occ_grid_size).long()
@@ -235,6 +245,8 @@ class QuadcopterRnnEnv(DirectRLEnv):
         Returns: (8, 16, 16) SVS map.
         """
         pos_w = self._robot.data.root_pos_w[env_id]
+        env_origin = self.scene.env_origins[env_id]                                                                          
+        local_pos = pos_w - env_origin 
         cz = int((pos_w[2] - self.occ_origin[2]) / self.occ_grid_size)
         cy = int((pos_w[1] - self.occ_origin[1]) / self.occ_grid_size)
         cx = int((pos_w[0] - self.occ_origin[0]) / self.occ_grid_size)
@@ -272,6 +284,8 @@ class QuadcopterRnnEnv(DirectRLEnv):
         Returns: (8, 16, 16) binary occupancy map.
         """
         pos_w = self._robot.data.root_pos_w[env_id]
+        env_origin = self.scene.env_origins[env_id]                                                                          
+        local_pos = pos_w - env_origin 
         cz = int((pos_w[2] - self.occ_origin[2]) / self.occ_grid_size)
         cy = int((pos_w[1] - self.occ_origin[1]) / self.occ_grid_size)
         cx = int((pos_w[0] - self.occ_origin[0]) / self.occ_grid_size)
@@ -411,7 +425,7 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self.alive_steps[~is_alive] = 0 
                                                                                                                                                                             
         # ── Save maps periodically — only for envs alive long enough ──────────
-        if LOCAL_MAP_SAVE_EVERY > 0 and self.common_step_counter % LOCAL_MAP_SAVE_EVERY == 0:                                                                                
+        if LOCAL_MAP_SAVE_EVERY > 0 and self.common_step_counter <= LOCAL_MAP_START_STEP and self.common_step_counter % LOCAL_MAP_SAVE_EVERY == 0:                                                                               
             eligible = (self.alive_steps >= MIN_ALIVE_STEPS_TO_SAVE).nonzero(as_tuple=False).view(-1)
             if eligible.numel() > 0:                                                                                                                                         
                 self._save_local_maps(eligible) 
@@ -437,6 +451,10 @@ class QuadcopterRnnEnv(DirectRLEnv):
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
+        # print("occ_origin:", self.occ_origin)
+        # print("env_origin[0]:", self._terrain.env_origins[0])
+        # print("env_origin[1]:", self._terrain.env_origins[1])
+        # print("env_origin[2]:", self._terrain.env_origins[2])
         origins = self.scene.env_origins
         lin_vel_sum = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel_sum = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
@@ -513,17 +531,27 @@ class QuadcopterRnnEnv(DirectRLEnv):
         self._prev_actions[env_ids] = 0.0
         self._actions[env_ids] = 0.0
         self.alive_steps[env_ids] = 0.0
-
-        self._desired_pos_w[env_ids, 0] = torch.zeros_like(self._desired_pos_w[env_ids, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
-        self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(self.y_min + 1.0, self.y_max - 1.0)
-        self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(self.z_min + 1.0, self.z_max - 1.0)
+        n = len(env_ids)
+        idxs = torch.randint(0, self.occupied_pos_w.shape[0], (n,), device=self.device) 
+        self._desired_pos_w[env_ids] = self.occupied_pos_w[idxs] + self.scene.env_origins[env_ids]
+        # self._desired_pos_w[env_ids, 0] = torch.zeros_like(self._desired_pos_w[env_ids, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
+        # #self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(self.y_min + 1.0, self.y_max - 1.0)
+        # self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(0.0, self.y_max - 1.0)
+        # self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
+        # self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(self.z_min + 1.0, self.z_max - 1.0)
 
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
+        # default_root_state = self._robot.data.default_root_state[env_ids]
+        # default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        # default_root_state[:, 2] = 1.0
         default_root_state = self._robot.data.default_root_state[env_ids]
-        default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        default_root_state[:, 2] = 1.0
+        default_root_state[:, 0] = torch.zeros_like(default_root_state[:, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
+        #self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(self.y_min + 1.0, self.y_max - 1.0)
+        default_root_state[:, 1] = torch.zeros_like(default_root_state[:, 1]).uniform_(0.0, self.y_max - 1.0)
+        default_root_state[:, :2] += self._terrain.env_origins[env_ids, :2]
+        default_root_state[:, 2] = torch.zeros_like(default_root_state[:, 2]).uniform_(self.z_min + 1.0, self.z_max - 1.0)
+
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
