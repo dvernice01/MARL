@@ -28,13 +28,15 @@ class ImgEncoder(nn.Module):
     def __init__(self, input_dim, latent_dim,
                  num_conv_layers=4,
                  use_residual=True,
-                 residual_every=2):    # ← swept: 1, 2, 3 (every N deep layers)
+                 residual_every=2,
+                 use_skip=True):    # ← swept: 1, 2, 3 (every N deep layers)
         super().__init__()
         self.input_dim       = input_dim
         self.latent_dim      = latent_dim
         self.num_conv_layers = num_conv_layers
         self.use_residual    = use_residual
         self.residual_every  = residual_every
+        self.use_skip        = use_skip
         self.relu            = nn.ReLU()
 
         self.channel_plan = [
@@ -99,7 +101,7 @@ class ImgEncoder(nn.Module):
             if i in self.residual_at:
                 self.res_blocks[str(i)] = ResidualBlock(out_ch)
 
-            if i > 0 and i % 2 == 0:
+            if use_skip and i > 0 and i % 2 == 0:
                 prev_ch = self.channel_plan[i - 1][1]
                 if prev_ch != out_ch:
                     self.skip_layers[str(i)] = nn.Conv2d(
@@ -148,7 +150,8 @@ class ImgDecoder(nn.Module):
     def __init__(self, input_dim=1, latent_dim=64, with_logits=False,
                  num_deconv_layers=5,    # ← swept: 3, 4, 5, 6, 7
                  use_residual=True,
-                 residual_every=2):
+                 residual_every=2,
+                 use_skip=True):   # ← swept
         super().__init__()
         self.with_logits       = with_logits
         self.n_channels        = input_dim
@@ -269,7 +272,7 @@ class ImgDecoder(nn.Module):
                 self.res_blocks[str(i)] = ResidualBlock(out_ch, activation=nn.ELU)
 
             # skip connection when channels change and not final
-            if in_ch != out_ch and s > 1 and not is_final:                                                                                                                       
+            if use_skip and in_ch != out_ch and s > 1 and not is_final:                                                                                                                       
                 op_h = op[0] + (k - 1) - 2 * p                                                                                                                                   
                 op_w = op[1] + (k - 1) - 2 * p
                 if 0 <= op_h < s and 0 <= op_w < s:                                                                                                                              
@@ -368,7 +371,8 @@ class VAE(nn.Module):
                  num_conv_layers=4,      # ← swept
                  use_residual=True,
                  residual_every=2,
-                 num_deconv_layers=5):   # ← swept
+                 num_deconv_layers=5,
+                 use_skip=True):   # ← swept
         
         super().__init__()
         self.with_logits    = with_logits
@@ -382,6 +386,7 @@ class VAE(nn.Module):
             num_conv_layers = num_conv_layers,
             use_residual    = use_residual,
             residual_every   = residual_every,
+            use_skip        = use_skip,
         )
         self.img_decoder = ImgDecoder(
             input_dim        = 1,
@@ -390,6 +395,7 @@ class VAE(nn.Module):
             num_deconv_layers = num_deconv_layers,  
             use_residual     = use_residual,
             residual_every   = residual_every,
+            use_skip         = use_skip,
         )
 
         self.mean_params   = Lambda(lambda x: x[:, :latent_dim])

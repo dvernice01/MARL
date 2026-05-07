@@ -13,10 +13,12 @@ parameters:
     values: [ 3, 4, 5, 6]  
   use_residual:
     values: [true, false]
+  use_skip:
+    values: [true, false]
   # decoder_num_dense:
   #   values: [1, 2, 3]
   beta_max:
-    values: [40, 100, 200, 500, 1000, 2000, 5000]
+    values: [40, 100, 300, 500, 1000, 2000, 5000, 10000]
   num_deconv_layers:
     values: [5]
   residual_every:

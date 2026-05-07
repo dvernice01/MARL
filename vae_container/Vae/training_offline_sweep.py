@@ -291,7 +291,7 @@ def visualize(model, dataset, device, epoch, save_dir='debug_epochs'):
     plt.close()
 
     # log image to wandb
-    wandb.log({"viz/reconstruction": wandb.Image(path)}, commit=False)
+    #wandb.log({"viz/reconstruction": wandb.Image(path)}, commit=False)
 
 
 # ── TEST LOOP ─────────────────────────────────────────────────────────────────
@@ -312,8 +312,8 @@ def run_test(model, test_loader, device, beta):
             labels  = labels.to(device)
             masks   = masks.to(device)
 
-            recon, mean, logvar, _ = model(inputs)
-            loss, recon_l, kl_l = dce_loss(recon, inputs, masks, mean, logvar, beta=beta)
+            recon, mean, logvar, _ = model(labels)
+            loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
 
             test_loss       += loss.item()
             test_recon_loss += recon_l.item()
@@ -408,8 +408,8 @@ def main():
         for inputs, labels, masks in train_loader:
             inputs, labels, masks = inputs.to(device), labels.to(device), masks.to(device)
             optimizer.zero_grad()
-            recon, mean, logvar, _ = model(inputs)
-            loss, recon_l, kl_l = dce_loss(recon, inputs, masks, mean, logvar, beta=beta)
+            recon, mean, logvar, _ = model(labels)
+            loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -429,8 +429,8 @@ def main():
         with torch.no_grad():
             for inputs, labels, masks in val_loader:
                 inputs, labels, masks = inputs.to(device), labels.to(device), masks.to(device)
-                recon, mean, logvar, _ = model(inputs)
-                loss, recon_l, kl_l = dce_loss(recon, inputs, masks, mean, logvar, beta=beta)
+                recon, mean, logvar, _ = model(labels)
+                loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
                 val_loss  += loss.item()
                 val_recon += recon_l.item()
                 val_kl    += kl_l.item()
