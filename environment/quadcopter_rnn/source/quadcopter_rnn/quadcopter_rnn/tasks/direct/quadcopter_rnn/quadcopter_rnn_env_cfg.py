@@ -132,8 +132,8 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
     # )
 
     # reward scales
-    lin_vel_reward_scale = 0.0
-    ang_vel_reward_scale = 0.0
+    lin_vel_reward_scale = -1.0
+    ang_vel_reward_scale = -1.0
     distance_to_goal_reward_scale = 100.0
     rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1
