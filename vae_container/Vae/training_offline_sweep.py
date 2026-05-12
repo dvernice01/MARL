@@ -180,14 +180,14 @@ def make_warehouse_loader(base_dir, batch_size=32, num_workers=2, target_size=(2
 
 # ── LOSS ──────────────────────────────────────────────────────────────────────
 
-def build_beta_schedule(warmup_end=200, beta_max=10.0, total_epochs=400):
+def build_beta_schedule(warmup_end=100, beta_max=10.0, total_epochs=200):
     schedule = np.zeros(total_epochs)
     schedule[:warmup_end] = 0.0
     schedule[warmup_end:] = np.linspace(0.0, beta_max, total_epochs - warmup_end)
     return schedule
 
 
-def dce_loss(recon, target, valid_mask, mean, logvar, beta=3.0):
+def dce_loss(recon, target, valid_mask, mean, logvar, beta=10.0):
     squared_error = (recon - target) ** 2
     masked_error  = squared_error * valid_mask
     n_valid       = valid_mask.sum().clamp(min=1)
@@ -372,15 +372,16 @@ def main():
         use_residual       = cfg.use_residual,
         num_deconv_layers  = cfg.num_deconv_layers,
         residual_every     = cfg.residual_every,
+        use_skip           = cfg.use_skip,
         #decoder_num_dense = cfg.decoder_num_dense,
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=15, verbose=True
     )
 
-    epochs        = 150
+    epochs        = 200
     beta_schedule = build_beta_schedule(
         warmup_end = 100,
         beta_max   = cfg.beta_max,
@@ -399,8 +400,8 @@ def main():
 
     # ── training loop ─────────────────────────────────────────────────────────
     for epoch in range(1, epochs + 1):
-        #beta = float(beta_schedule[epoch - 1])
-        beta = 0.0
+        beta = float(beta_schedule[epoch - 1])
+        #beta = 0.0
         # ── train ─────────────────────────────────────────────────────────────
         model.train()
         train_loss = train_recon = train_kl = 0.0
@@ -487,7 +488,7 @@ def main():
     model.eval()
 
     #test_metrics = run_test(model, test_loader, device, beta=float(beta_schedule[-1]))
-    test_metrics = run_test(model, test_loader, device, beta= 0.0)
+    test_metrics = run_test(model, test_loader, device, beta= beta)
 
     vis_dir_test = os.path.join(run_dir, "visualizations_test")
     for i in range(5):                                                                                                                                                   

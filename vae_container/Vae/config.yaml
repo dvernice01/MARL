@@ -8,19 +8,19 @@ metric:
 
 parameters:
   latent_dim:
-    values: [128, 256, 512]
+    values: [256, 512]
   num_conv_layers:
-    values: [ 3, 4, 5, 6]  
+    values: [5, 6]  
   use_residual:
-    values: [true, false]
+    values: [True]
   use_skip:
-    values: [true, false]
-  # decoder_num_dense:
-  #   values: [1, 2, 3]
+    values: [True]
   beta_max:
-    values: [40, 100, 300, 500, 1000, 2000, 5000, 10000]
+    values: [500, 1000, 2000, 5000, 10000]
   num_deconv_layers:
-    values: [5]
+    values: [7]
   residual_every:
     values: [2]
+  lr:
+    values: [1e-4]
 

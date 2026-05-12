@@ -12,7 +12,10 @@ class ResidualBlock(nn.Module):
         super().__init__()                                                                                                                                           
         act = activation()
         self.block = nn.Sequential(                                                                                                                                  
-            activation(),          
+            activation(), 
+            # 103: channels, channels va bene? 3x3 come kernel va bene?
+            # 103: viene chiamato come: self.res_blocks[str(i)] = ResidualBlock(out_ch)   
+            # 103: conviene usare la "Dilated convolution"? Consigliato da Claude ma per adesso ignorato   
             nn.Conv2d(channels, channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(channels),                               
             activation(),                                                                                                                                            
@@ -69,6 +72,7 @@ class ImgEncoder(nn.Module):
 
         self.residual_at = set()
         if use_residual and num_conv_layers >= 3:
+            # 103: residual dalla metà in poi è ok? ogni 1 o 2 layers?
             deep_start = num_conv_layers // 2          # first deep layer
             deep_layers = list(range(deep_start, num_conv_layers))
             # pick every Nth layer from the deep half
@@ -91,6 +95,8 @@ class ImgEncoder(nn.Module):
         for i in range(num_conv_layers):
             in_ch, out_ch = self.channel_plan[i]
             stride = 2 if i < 2 else (2 if i % 2 == 0 else 1)
+            # 103: ha senso usare stride in questo modo? 
+            # 103: 2 stride nei primi 2 layer per dimezzare subito, poi alternanza di stride 2 e 1 per bilanciare downsampling e raffinamento?
 
             self.conv_layers.append(
                 nn.Conv2d(in_ch, out_ch, kernel_size=3,
@@ -104,6 +110,7 @@ class ImgEncoder(nn.Module):
             if use_skip and i > 0 and i % 2 == 0:
                 prev_ch = self.channel_plan[i - 1][1]
                 if prev_ch != out_ch:
+                    # 103: skip layers con kernel 1 e stride 2?
                     self.skip_layers[str(i)] = nn.Conv2d(
                         prev_ch, out_ch, kernel_size=1, stride=2, bias=False
                     )
@@ -112,8 +119,8 @@ class ImgEncoder(nn.Module):
         self.flat_size = self._compute_flat_size()
         print(f"  Encoder flat size: {self.flat_size}")
 
-        self.dense0 = nn.Linear(self.flat_size, 512)
-        self.dense1 = nn.Linear(512, 2 * self.latent_dim)
+        self.dense0 = nn.Linear(self.flat_size, 4 * self.latent_dim)
+        self.dense1 = nn.Linear(4 * self.latent_dim, 2 * self.latent_dim)
 
     def _compute_flat_size(self):
         with torch.no_grad():
@@ -161,9 +168,9 @@ class ImgDecoder(nn.Module):
         self.elu = nn.ELU()
 
         # ── Dense layers — FIXED, identical to original ────────────────────────
-        self.dense0 = nn.Linear(latent_dim, 512)
-        self.dense1 = nn.Linear(512, 1024)
-        self.dense2 = nn.Linear(1024, 9 * 15 * 128)
+        self.dense0 = nn.Linear(latent_dim, latent_dim * 2)
+        self.dense1 = nn.Linear(latent_dim * 2, latent_dim * 4)
+        self.dense2 = nn.Linear(latent_dim * 4, 9 * 15 * 128) # 103: 9x15x128 deriva dal codice originale, va bene anche nel mio caso?
 
         # ── Deconv layer pool — all possible layers in order ───────────────────
         # Each entry: (in_ch, out_ch, kernel, stride, padding, output_padding)
@@ -234,16 +241,24 @@ class ImgDecoder(nn.Module):
 
         # ── Residual placement — only on non-final upsample layers ────────────
         # skip refinement layers (stride=1) and final output layer
-        upsample_idxs = [
-            i for i, (_, _, _, s, _, _) in enumerate(deconv_cfgs)
-            if s > 1 and i < len(deconv_cfgs) - 1   # not final
-        ]
+        # upsample_idxs = [
+        #     i for i, (_, _, _, s, _, _) in enumerate(deconv_cfgs)
+        #     if s > 1 and i < len(deconv_cfgs) - 1   # not final
+        # ]
         self.residual_at = set()
-        if use_residual and len(upsample_idxs) > 0:
+        if use_residual and num_deconv_layers >= 3:
+            deep_start = num_deconv_layers // 2          # first deep layer
+            deep_layers = list(range(deep_start, num_deconv_layers))
+            # pick every Nth layer from the deep half
             self.residual_at = set(
-                upsample_idxs[i]
-                for i in range(0, len(upsample_idxs), residual_every)
+                deep_layers[i]
+                for i in range(0, len(deep_layers), residual_every)
             )
+        # if use_residual and len(upsample_idxs) > 0:
+        #     self.residual_at = set(
+        #         upsample_idxs[i]
+        #         for i in range(0, len(upsample_idxs), residual_every)
+        #     )
 
         print(f"  Decoder: {num_deconv_layers} deconv layers | "
               f"residual at: {sorted(self.residual_at) or 'none'}")
@@ -328,6 +343,7 @@ class ImgDecoder(nn.Module):
         x = self.elu(self.dense1(x))
         x = self.elu(self.dense2(x))
         x = x.view(x.size(0), 128, 9, 15)
+        # 103: in questo caso uso nn.ELU perchè lo faceva il codice originale
 
         # variable deconv
         for i, (deconv, bn) in enumerate(
