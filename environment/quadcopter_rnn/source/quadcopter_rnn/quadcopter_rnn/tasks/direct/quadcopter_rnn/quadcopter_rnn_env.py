@@ -56,7 +56,7 @@ LOCAL_MAP_SAVE_EVERY = 1000   # steps between saves; set to 0 to disable
 LOCAL_NZ = 8                 # local map depth  (z axis)
 LOCAL_NY = 16                # local map height (y axis)
 LOCAL_NX = 16                # local map width  (x axis)
-MIN_ALIVE_STEPS_TO_SAVE = 20 # consecutive alive steps required before saving a map
+MIN_ALIVE_STEPS_TO_SAVE = 0 # consecutive alive steps required before saving a map
 LOCAL_MAP_START_STEP = 0
 LOCAL_CELL_SIZE = 0.25
 
