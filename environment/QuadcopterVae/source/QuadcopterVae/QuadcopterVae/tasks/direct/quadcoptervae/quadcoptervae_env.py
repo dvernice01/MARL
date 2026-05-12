@@ -58,10 +58,10 @@ class PolicyNet(torch.nn.Module):
 
 class vae_config:
     use_vae = True
-    latent_dims = 512
+    latent_dims = 128
     #032824
     model_file = (
-        "/workspace/vae_container/Vae/checkpoint/vae_best_20260505_055654.pt"
+        "/workspace/vae_container/Vae/runs/n2bhpdat/laced-sweep-10/checkpoints/vae_best_20260510_003430.pt"
     )
     model_folder = "/workspace/vae_container/Vae/checkpoint"
     image_res = (270, 480)
@@ -260,8 +260,19 @@ class VAEImageEncoder:
         self.device = device
         self.collision = CollisionImage()
         #self.collision.__init__()
-        self.vae_model = VAE(input_dim=1, latent_dim=self.config.latent_dims,inference_mode = True).to(self.device)
-        # combine module path with model file name
+        self.vae_model = VAE(
+            input_dim          = 1,
+            latent_dim         = 128,
+            with_logits        = False,
+            inference_mode     = True,
+            num_conv_layers    = 6,
+            use_residual       = True,
+            num_deconv_layers  = 5,
+            residual_every     = 1,
+            use_skip           = False,
+            #decoder_num_dense = cfg.decoder_num_dense,
+        ).to(device)
+    # combine module path with model file name
         weight_file_path = self.config.model_file
         # load model weights
         print("Loading weights from file: ", weight_file_path)
