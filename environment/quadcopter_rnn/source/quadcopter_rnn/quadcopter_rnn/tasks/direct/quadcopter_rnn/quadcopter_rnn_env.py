@@ -75,7 +75,7 @@ def visualize_occupancy_3d(occ_map: torch.Tensor, save_path: str = "occupancy_ma
 
     fig = plt.figure(figsize=(10, 7))
     ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(ix, iy, iz, s=1, c='red', alpha=0.3)
+    ax.scatter(ix, iy, iz, s=1, c='red', alpha=0.3, marker='s')
     ax.set_xlabel("x (voxels)")
     ax.set_ylabel("y (voxels)")
     ax.set_zlabel("z (voxels)")
@@ -271,9 +271,11 @@ class QuadcopterRnnEnv(DirectRLEnv):
       Nt = coarse.sum()                                                                                                              
       svs = torch.zeros_like(coarse)                                                                                                 
       if Nt > 0:                                                                                                                     
-          p = coarse / Nt
-          svs = torch.where(p > 0, -p * torch.log(p), svs)                                                                           
-      return svs
+        p = coarse / Nt
+        svs = torch.where(p > 0, -p * torch.log(p), svs)                                                                           
+        local_occ = self._build_local_occ_map(env_id)                                                
+        svs[local_occ > 0.5] = 0.0
+        return svs
 
     # ── SECTION 3: Sample local occupancy map from global ─────────────────────
     def _build_local_occ_map(self, env_id: int) -> torch.Tensor:

@@ -84,7 +84,7 @@ def plot_3d_voxels(data: np.ndarray, title_prefix: str, save_path: str | None = 
     # ── Occupancy ─────────────────────────────────────────────────────────────
     ax1 = fig.add_subplot(121, projection="3d")
     iz, iy, ix = np.where(occ > 0.5)
-    ax1.scatter(ix, iy, iz, s=2, c="red", alpha=0.4)
+    ax1.scatter(ix, iy, iz, s=2, c="red", alpha=0.4, marker="s")
     ax1.set_box_aspect([16, 16, 8]) 
     ax1.set_title("Occupancy (occupied voxels)")
     ax1.set_xlabel("x"); ax1.set_ylabel("y"); ax1.set_zlabel("z")
@@ -94,7 +94,7 @@ def plot_3d_voxels(data: np.ndarray, title_prefix: str, save_path: str | None = 
     threshold = svs.max() * 0.05   # show top 95% of entropy mass
     iz, iy, ix = np.where(svs > threshold)
     vals = svs[iz, iy, ix]
-    sc = ax2.scatter(ix, iy, iz, s=2, c=vals, cmap="viridis", alpha=0.5)
+    sc = ax2.scatter(ix, iy, iz, s=2, c=vals, cmap="viridis", alpha=0.5, marker="s")
     ax2.set_box_aspect([16, 16, 8]) 
     fig.colorbar(sc, ax=ax2, shrink=0.5, label="entropy")
     ax2.set_title("SVS — visit entropy")
