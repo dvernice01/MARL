@@ -271,7 +271,7 @@ def visualize(model, dataset, device, epoch, save_dir='debug_epochs'):
         for col in range(3):
             idx = indices[col]
             depth_t, coll_t, mask_t = dataset[idx]
-            recon, *_ = model(depth_t.unsqueeze(0).to(device)) # PER ADESSO LO STO TESTANDO SU DEPTH
+            recon, *_ = model(coll_t.unsqueeze(0).to(device)) # PER ADESSO LO STO TESTANDO SU DEPTH
             #recon, *_ = model(coll_t.unsqueeze(0).to(device))
             for row, arr in enumerate([
                 depth_t.squeeze().numpy(),
