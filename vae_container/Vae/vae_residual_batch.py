@@ -13,7 +13,7 @@ class ResidualBlock(nn.Module):
         act = activation()
         self.block = nn.Sequential(                                                                                                                                  
             activation(), 
-            # 103: channels, channels va bene? 3x3 come kernel va bene?
+            # 103: (channels, channels) in Conv2d va bene? 3x3 come kernel va bene?
             # 103: viene chiamato come: self.res_blocks[str(i)] = ResidualBlock(out_ch)   
             # 103: conviene usare la "Dilated convolution"? Consigliato da Claude ma per adesso ignorato   
             nn.Conv2d(channels, channels, 3, padding=1, bias=False),
@@ -28,7 +28,8 @@ class ResidualBlock(nn.Module):
 
 
 class ImgEncoder(nn.Module):
-    def __init__(self, input_dim, latent_dim,
+    def __init__(self, input_dim= 1, # 1 perchè è 1 canale
+                 latent_dim=512,
                  num_conv_layers=4,
                  use_residual=True,
                  residual_every=2,
@@ -42,15 +43,26 @@ class ImgEncoder(nn.Module):
         self.use_skip        = use_skip
         self.relu            = nn.ReLU()
 
+        # self.channel_plan = [
+        #     (input_dim, latent_dim * 8),
+        #     (latent_dim * 4,        latent_dim * 4),
+        #     (latent_dim * 4,        latent_dim * 2),
+        #     #flat_layer per rendere 1 x latent_dim * 2 piuttosto che latent_dim * 2 x ke
+        #     self.dense0 = nn.Linear(2 * self.latent_dim, self.latent_dim)
+        #     # self.dense1 = nn.Linear(4 * self.latent_dim, 2 * self.latent_dim)
+        #     # self.dense2 = nn.Linear(2 * self.latent_dim, self.latent_dim)
+        #     (64,        128),
+        #     (128,       128),
+        #     (128,       128),
+        # ]
         self.channel_plan = [
             (input_dim, 32),
-            (32,        32),
             (32,        64),
             (64,        128),
-            (128,       128),
-            (128,       128),
+            (128,        256),
+            (256,       512),
+            (512,       512),
         ]
-
         # ── Residual block placement ───────────────────────────────────────────
         # Residuals are only placed in the DEEP half of the network
         # (shallow layers detect simple features, don't benefit from refinement)
@@ -221,13 +233,13 @@ class ImgDecoder(nn.Module):
                 ( 16,   1, 4, 2, 2, (0, 0)),   # (1,  270, 480)   x2  final
             ],
             7: [
-                (128, 128, 3, 1, 1, (0, 0)),   # (128,  9,  15)   refinement
-                (128,  64, 5, 2, 2, (0, 1)),   # (64,  17,  30)   x2
-                ( 64,  64, 3, 1, 1, (0, 0)),   # (64,  17,  30)   refinement
-                ( 64,  32, 6, 4, 2, (0, 0)),   # (32,  68, 120)   x4
-                ( 32,  32, 3, 1, 1, (0, 0)),   # (32,  68, 120)   refinement
-                ( 32,  16, 6, 2, 0, (0, 1)),   # (16, 135, 241)   x2
-                ( 16,   1, 4, 2, 2, (0, 0)),   # (1,  270, 480)   x2  final
+                (512, 512, 3, 1, 1, (0, 0)),   # (128,  9,  15)   refinement
+                (512,  256, 5, 2, 2, (0, 1)),   # (64,  17,  30)   x2
+                ( 256,  256, 3, 1, 1, (0, 0)),   # (64,  17,  30)   refinement
+                ( 256,  128, 6, 4, 2, (0, 0)),   # (32,  68, 120)   x4
+                ( 128,  64, 3, 1, 1, (0, 0)),   # (32,  68, 120)   refinement
+                ( 64,  32, 6, 2, 0, (0, 1)),   # (16, 135, 241)   x2
+                ( 32,   1, 4, 2, 2, (0, 0)),   # (1,  270, 480)   x2  final
             ],
         }
 

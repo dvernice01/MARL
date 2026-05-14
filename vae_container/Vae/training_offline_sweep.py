@@ -182,19 +182,20 @@ def make_warehouse_loader(base_dir, batch_size=32, num_workers=2, target_size=(2
 
 def build_beta_schedule(warmup_end=100, beta_max=10.0, total_epochs=200):
     schedule = np.zeros(total_epochs)
-    schedule[:warmup_end] = 0.0
-    schedule[warmup_end:] = np.linspace(0.0, beta_max, total_epochs - warmup_end)
+    schedule[:warmup_end] = np.linspace(0.0, beta_max, warmup_end)
+    schedule[warmup_end:] = beta_max
     return schedule
 
 
-def dce_loss(recon, target, valid_mask, mean, logvar, beta=10.0):
+def dce_loss(recon, target, valid_mask, mean, logvar, beta=10.0, use_free_bits=False):
     squared_error = (recon - target) ** 2
     masked_error  = squared_error * valid_mask
     n_valid       = valid_mask.sum().clamp(min=1)
     recon_loss    = masked_error.sum() / n_valid
 
     kl_per_dim = -0.5 * (1 + logvar - mean.pow(2) - logvar.exp())
-    kl_per_dim = torch.clamp(kl_per_dim, min=0.5)
+    if use_free_bits:
+        kl_per_dim = torch.clamp(kl_per_dim, min=0.5)
     kl_loss    = kl_per_dim.mean()
 
     total = recon_loss + beta * kl_loss
@@ -296,7 +297,7 @@ def visualize(model, dataset, device, epoch, save_dir='debug_epochs'):
 
 # ── TEST LOOP ─────────────────────────────────────────────────────────────────
 
-def run_test(model, test_loader, device, beta):
+def run_test(model, test_loader, device, beta, use_free_bits=False):
     """
     Evaluates the model on the Warehouse test set.
     Returns a dict of test metrics.
@@ -313,7 +314,7 @@ def run_test(model, test_loader, device, beta):
             masks   = masks.to(device)
 
             recon, mean, logvar, _ = model(labels)
-            loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
+            loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta, use_free_bits=use_free_bits)
 
             test_loss       += loss.item()
             test_recon_loss += recon_l.item()
@@ -395,7 +396,8 @@ def main():
     vis_dir_test = os.path.join(run_dir, "visualizations_train")
     visualize(model, val_data, device, epoch=0, save_dir=vis_dir_test)
 
-    best_val_loss = float('inf')
+    best_val_recon = float('inf')
+    use_free_bits = (cfg.beta_max <= 1)
     timestamp     = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # ── training loop ─────────────────────────────────────────────────────────
@@ -410,7 +412,7 @@ def main():
             inputs, labels, masks = inputs.to(device), labels.to(device), masks.to(device)
             optimizer.zero_grad()
             recon, mean, logvar, _ = model(labels)
-            loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
+            loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta, use_free_bits=use_free_bits)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -431,7 +433,7 @@ def main():
             for inputs, labels, masks in val_loader:
                 inputs, labels, masks = inputs.to(device), labels.to(device), masks.to(device)
                 recon, mean, logvar, _ = model(labels)
-                loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta)
+                loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta, use_free_bits=use_free_bits)
                 val_loss  += loss.item()
                 val_recon += recon_l.item()
                 val_kl    += kl_l.item()
@@ -462,7 +464,6 @@ def main():
             "val/loss":         val_loss,
             "val/recon_loss":   val_recon,
             "val/kl_loss":      val_kl,
-            "val/loss_to_minimize": val_recon + val_kl,
         })
 
         # ── periodic visualization ────────────────────────────────────────────
@@ -470,14 +471,13 @@ def main():
             visualize(model, val_data, device, epoch, save_dir=vis_dir_test)
 
         # ── checkpoint ────────────────────────────────────────────────────────
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_recon < best_val_recon:
             ckpt_dir  = os.path.join(run_dir, "checkpoints")
             os.makedirs(ckpt_dir, exist_ok=True)
             ckpt_path = os.path.join(ckpt_dir, f"vae_best_{timestamp}.pt")
             torch.save(model.state_dict(), ckpt_path)
-            print(f"  Saved best model (val={val_loss:.4f}) → {ckpt_path}")
-            wandb.run.summary["best_val_loss"] = best_val_loss
+            print(f"  Saved best model (val_recon={val_recon:.4f}) → {ckpt_path}")
+            wandb.run.summary["best_val_recon"] = best_val_recon
             wandb.run.summary["best_checkpoint"] = ckpt_path
 
     # ── TEST on Warehouse dataset ──────────────────────────────────────────────
@@ -488,7 +488,7 @@ def main():
     model.eval()
 
     #test_metrics = run_test(model, test_loader, device, beta=float(beta_schedule[-1]))
-    test_metrics = run_test(model, test_loader, device, beta= beta)
+    test_metrics = run_test(model, test_loader, device, beta= beta, use_free_bits=use_free_bits)
 
     vis_dir_test = os.path.join(run_dir, "visualizations_test")
     for i in range(5):                                                                                                                                                   
