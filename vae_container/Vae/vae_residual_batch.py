@@ -128,6 +128,7 @@ class ImgEncoder(nn.Module):
                     )
                     self.skip_bn[str(i)] = nn.BatchNorm2d(out_ch)
 
+        self.pool = nn.AdaptiveAvgPool2d((4, 4))
         self.flat_size = self._compute_flat_size()
         print(f"  Encoder flat size: {self.flat_size}")
 
@@ -146,6 +147,7 @@ class ImgEncoder(nn.Module):
                     x = self.relu(x + skip)
                 if str(i) in self.res_blocks:
                     x = self.res_blocks[str(i)](x)
+            x = self.pool(x)
             return x.view(1, -1).shape[1]
 
     def forward(self, img):
@@ -161,6 +163,7 @@ class ImgEncoder(nn.Module):
 
             if str(i) in self.res_blocks:
                 x = self.res_blocks[str(i)](x)
+        x = self.pool(x)
         x = x.view(x.size(0), -1)
         x = self.relu(self.dense0(x))
         return self.dense1(x)
@@ -179,10 +182,18 @@ class ImgDecoder(nn.Module):
         self.residual_every    = residual_every
         self.elu = nn.ELU()
 
+        _start_ch_map = {3: 128, 4: 128, 5: 128, 6: 128, 7: 512}
+        if num_deconv_layers not in _start_ch_map:
+            raise ValueError(
+                f"num_deconv_layers={num_deconv_layers} not supported. "
+                f"Choose from {list(_start_ch_map.keys())}"
+            )
+        self.start_ch = _start_ch_map[num_deconv_layers]
+
         # ── Dense layers — FIXED, identical to original ────────────────────────
         self.dense0 = nn.Linear(latent_dim, latent_dim * 2)
         self.dense1 = nn.Linear(latent_dim * 2, latent_dim * 4)
-        self.dense2 = nn.Linear(latent_dim * 4, 9 * 15 * 128) # 103: 9x15x128 deriva dal codice originale, va bene anche nel mio caso?
+        self.dense2 = nn.Linear(latent_dim * 4, 9 * 15 * self.start_ch) # 103: 9x15x128 deriva dal codice originale, va bene anche nel mio caso?
 
         # ── Deconv layer pool — all possible layers in order ───────────────────
         # Each entry: (in_ch, out_ch, kernel, stride, padding, output_padding)
@@ -318,7 +329,7 @@ class ImgDecoder(nn.Module):
     def _verify_output_size(self):
         """Sanity check — confirm we reach exactly (1, 270, 480)."""
         with torch.no_grad():
-            dummy = torch.zeros(1, 128, 9, 15)
+            dummy = torch.zeros(1, self.start_ch, 9, 15)
             x = dummy
             for i, (deconv, bn) in enumerate(
                 zip(self.deconv_layers, self.deconv_bn)
@@ -354,7 +365,7 @@ class ImgDecoder(nn.Module):
         x = self.elu(self.dense0(z))
         x = self.elu(self.dense1(x))
         x = self.elu(self.dense2(x))
-        x = x.view(x.size(0), 128, 9, 15)
+        x = x.view(x.size(0), self.start_ch, 9, 15)
         # 103: in questo caso uso nn.ELU perchè lo faceva il codice originale
 
         # variable deconv

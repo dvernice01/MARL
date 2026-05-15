@@ -351,13 +351,13 @@ def main():
     train_loader, val_loader = make_isaaclab_loaders(
         data_dir    = "isaaclab_dataset_right_size",
         val_ratio   = 0.1,
-        batch_size  = 32,
+        batch_size  = 8,
         num_workers = 2,
         target_size = target_res,
     )
     test_loader = make_warehouse_loader(
         base_dir    = "warehouse_detection_dataset",
-        batch_size  = 32,
+        batch_size  = 8,
         num_workers = 2,
         target_size = target_res,
     )
@@ -399,7 +399,7 @@ def main():
     best_val_recon = float('inf')
     use_free_bits = (cfg.beta_max <= 1)
     timestamp     = datetime.now().strftime('%Y%m%d_%H%M%S')
-
+    #scaler = torch.amp.GradScaler('cuda')
     # ── training loop ─────────────────────────────────────────────────────────
     for epoch in range(1, epochs + 1):
         beta = float(beta_schedule[epoch - 1])
@@ -407,16 +407,19 @@ def main():
         # ── train ─────────────────────────────────────────────────────────────
         model.train()
         train_loss = train_recon = train_kl = 0.0
-
-        for inputs, labels, masks in train_loader:
+        accum_steps = 4
+        optimizer.zero_grad()
+        for i, (inputs, labels, masks) in enumerate(train_loader):
             inputs, labels, masks = inputs.to(device), labels.to(device), masks.to(device)
-            optimizer.zero_grad()
             recon, mean, logvar, _ = model(labels)
             loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta, use_free_bits=use_free_bits)
+            loss = loss / accum_steps
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            train_loss  += loss.item()
+            if (i + 1) % accum_steps == 0 or (i + 1) == len(train_loader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+            train_loss  += loss.item() * accum_steps
             train_recon += recon_l.item()
             train_kl    += kl_l.item()
 
