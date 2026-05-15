@@ -170,15 +170,16 @@ def main():
 
     # Save filtered samples
     os.makedirs(args.output, exist_ok=True)
+
+    existing = [f for f in os.listdir(args.output) if f.endswith(".npy")]
+    start_idx = len(existing)
+
     for i, sample in enumerate(kept):
-        out_path = os.path.join(args.output, sample["fname"])
-        # Handle name collisions from multiple input dirs
-        if os.path.exists(out_path):
-            stem = Path(sample["fname"]).stem
-            out_path = os.path.join(args.output, f"{stem}_dup{i}.npy")
+        out_path = os.path.join(args.output, f"sample_{start_idx + i:06d}.npy")
         np.save(out_path, sample["data"])
 
-    print(f"\nSaved {len(kept)} filtered samples to {args.output}")
+    print(f"\nAppended {len(kept)} samples to {args.output} "
+        f"(indices {start_idx}–{start_idx + len(kept) - 1})")
 
 
 if __name__ == "__main__":
