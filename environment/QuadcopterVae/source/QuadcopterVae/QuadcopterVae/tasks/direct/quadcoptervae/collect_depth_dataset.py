@@ -100,8 +100,8 @@ class DepthCollectionEnv(DirectRLEnv):
         """
 
         pos_x = torch.zeros(n, device=self.device).uniform_(-27.0, 7.0) + self._terrain.env_origins[env_ids, 0]
-        pos_y = torch.zeros(n, device=self.device).uniform_(-40.0, 32.0) + self._terrain.env_origins[env_ids, 1]
-        pos_z = torch.zeros(n, device=self.device).uniform_( 1.0, 8.0) + self._terrain.env_origins[env_ids, 2]
+        pos_y = torch.zeros(n, device=self.device).uniform_(-5.0, 32.0) + self._terrain.env_origins[env_ids, 1]
+        pos_z = torch.zeros(n, device=self.device).uniform_( 0.5, 6.0) + self._terrain.env_origins[env_ids, 2]
 
         positions = torch.stack([pos_x, pos_y, pos_z], dim=-1)
 
@@ -132,6 +132,52 @@ class DepthCollectionEnv(DirectRLEnv):
 
         self.camera.set_world_poses(positions, orientations, env_ids)
 
+    def _reset_orientation_only(self, env_ids):
+        """Re-randomize camera orientation without changing position."""
+        n = len(env_ids)
+        current_pos = self.camera.data.pos_w[env_ids]
+
+        yaw   = torch.zeros(n, device=self.device).uniform_(-3.14159, 3.14159)
+        pitch = torch.zeros(n, device=self.device).uniform_(-1.2, 0.6)
+        roll  = torch.zeros(n, device=self.device).uniform_(-0.5, 0.5)
+
+        # Base quaternion: rotate -90 deg around X to point camera forward
+        base_qx = torch.full((n,), -0.7071, device=self.device)
+        base_qw = torch.full((n,),  0.7071, device=self.device)
+        base_qy = torch.zeros(n, device=self.device)
+        base_qz = torch.zeros(n, device=self.device)
+
+        # Yaw quaternion (rotation around Z)
+        cy, sy = torch.cos(yaw * 0.5), torch.sin(yaw * 0.5)
+        qw_yaw, qx_yaw, qy_yaw, qz_yaw = cy, torch.zeros_like(cy), torch.zeros_like(cy), sy
+
+        # Pitch quaternion (rotation around Y)
+        cp, sp = torch.cos(pitch * 0.5), torch.sin(pitch * 0.5)
+        qw_pitch, qx_pitch, qy_pitch, qz_pitch = cp, torch.zeros_like(cp), sp, torch.zeros_like(cp)
+
+        # Roll quaternion (rotation around X)
+        cr, sr = torch.cos(roll * 0.5), torch.sin(roll * 0.5)
+        qw_roll, qx_roll, qy_roll, qz_roll = cr, sr, torch.zeros_like(cr), torch.zeros_like(cr)
+
+        # Helper: multiply two quaternions q1 * q2
+        def quat_mul(w1, x1, y1, z1, w2, x2, y2, z2):
+            w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+            x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+            y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+            z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+            return w, x, y, z
+
+        # Compose: q_final = q_yaw * q_pitch * q_roll * q_base
+        w, x, y, z = quat_mul(qw_roll, qx_roll, qy_roll, qz_roll,
+                                base_qw, base_qx, base_qy, base_qz)
+        w, x, y, z = quat_mul(qw_pitch, qx_pitch, qy_pitch, qz_pitch,
+                                w, x, y, z)
+        qw, qx, qy, qz = quat_mul(qw_yaw, qx_yaw, qy_yaw, qz_yaw,
+                                    w, x, y, z)
+
+        orientations = torch.stack([qw, qx, qy, qz], dim=-1)
+        self.camera.set_world_poses(current_pos, orientations, env_ids)
+
 
 def collect_dataset():
     os.makedirs(os.path.join(args_cli.output_dir, "depth"),     exist_ok=True)
@@ -151,43 +197,64 @@ def collect_dataset():
     print(f"Collecting {args_cli.num_samples} samples...")
     obs, _ = env.reset()
 
+    ORIENTATIONS_PER_POSE = 4
+
     with tqdm(total=args_cli.num_samples) as pbar:
         while samples_collected < args_cli.num_samples:
-            obs, _ = env.reset() 
-            # No-op actions — camera doesn't move between resets
-            actions = torch.zeros(args_cli.num_envs, 4, device=env.device)
-            obs, reward, terminated, truncated, info = env.step(actions)
+            obs, _ = env.reset()
 
-            depth    = env.camera.data.output["distance_to_camera"]
-            depth_np = depth.squeeze(-1).cpu().numpy()  # (N, H, W)
-
-            for i in range(args_cli.num_envs):
+            for orient_idx in range(ORIENTATIONS_PER_POSE):
                 if samples_collected >= args_cli.num_samples:
                     break
 
-                d = depth_np[i]
-                d = np.where(np.isfinite(d), d, 10.0)  # replace inf with max range
-                valid_pixels = np.sum((d > 0.1) & (d < 9.9))
-                if valid_pixels < (d.size * 0.05):
-                    continue
+                if orient_idx > 0:
+                    # re-randomize orientation only (not position)
+                    env._reset_orientation_only(
+                        torch.arange(args_cli.num_envs, device=env.device)
+                    )
 
-                collision = collision_processor.depth_to_collision_image(d)
+                actions = torch.zeros(args_cli.num_envs, 4, device=env.device)
+                obs, reward, terminated, truncated, info = env.step(actions)
 
-                np.save(f"{args_cli.output_dir}/depth/{sample_idx:06d}.npy",     d.astype(np.float32))
-                np.save(f"{args_cli.output_dir}/collision/{sample_idx:06d}.npy", collision.astype(np.float32))
+                depth    = env.camera.data.output["distance_to_camera"]
+                depth_np = depth.squeeze(-1).cpu().numpy()
 
-                cv2.imwrite(
-                    f"{args_cli.output_dir}/depth/{sample_idx:06d}.png",
-                    (np.clip(d / 10.0, 0, 1) * 255).astype(np.uint8)
-                )
-                cv2.imwrite(
-                    f"{args_cli.output_dir}/collision/{sample_idx:06d}.png",
-                    (np.clip(collision, 0, 1) * 255).astype(np.uint8)
-                )
+                for i in range(args_cli.num_envs):
+                    if samples_collected >= args_cli.num_samples:
+                        break
 
-                sample_idx        += 1
-                samples_collected += 1
-                pbar.update(1)
+                    d = depth_np[i]
+                    d = np.where(np.isfinite(d), d, 10.0)
+                    valid_pixels = np.sum((d > 0.1) & (d < 9.9))
+                    if valid_pixels < (d.size * 0.15):
+                        continue
+
+                    far_ratio = np.sum(d >= 9.5) / d.size
+                    if far_ratio > 0.7:
+                        continue
+
+                    collision = collision_processor.depth_to_collision_image(d)
+
+                    close_pixels = np.sum(collision < 0.5)
+                    if close_pixels < (collision.size * 0.02):
+                        continue
+
+                    np.save(f"{args_cli.output_dir}/depth/{sample_idx:06d}.npy",     d.astype(np.float32))
+                    np.save(f"{args_cli.output_dir}/collision/{sample_idx:06d}.npy",
+collision.astype(np.float32))
+
+                    cv2.imwrite(
+                        f"{args_cli.output_dir}/depth/{sample_idx:06d}.png",
+                        (np.clip(d / 10.0, 0, 1) * 255).astype(np.uint8)
+                    )
+                    cv2.imwrite(
+                        f"{args_cli.output_dir}/collision/{sample_idx:06d}.png",
+                        (np.clip(collision, 0, 1) * 255).astype(np.uint8)
+                    )
+
+                    sample_idx        += 1
+                    samples_collected += 1
+                    pbar.update(1)
 
     env.close()
     print(f"Done. {samples_collected} samples saved to {args_cli.output_dir}")

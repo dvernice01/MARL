@@ -58,10 +58,10 @@ class PolicyNet(torch.nn.Module):
 
 class vae_config:
     use_vae = True
-    latent_dims = 128
+    latent_dims = 512
     #032824
     model_file = (
-        "/workspace/vae_container/Vae/runs/n2bhpdat/laced-sweep-10/checkpoints/vae_best_20260510_003430.pt"
+        "/workspace/vae_container/Vae/runs/xve5n1nh/brisk-sweep-1/checkpoints/vae_best_20260515_091157.pt"
     )
     model_folder = "/workspace/vae_container/Vae/checkpoint"
     image_res = (270, 480)
@@ -262,14 +262,14 @@ class VAEImageEncoder:
         #self.collision.__init__()
         self.vae_model = VAE(
             input_dim          = 1,
-            latent_dim         = 128,
+            latent_dim         = 512,
             with_logits        = False,
-            inference_mode     = True,
+            inference_mode     = False,
             num_conv_layers    = 6,
             use_residual       = True,
-            num_deconv_layers  = 5,
-            residual_every     = 1,
-            use_skip           = False,
+            num_deconv_layers  = 7,
+            residual_every     = 2,
+            use_skip           = True,
             #decoder_num_dense = cfg.decoder_num_dense,
         ).to(device)
     # combine module path with model file name

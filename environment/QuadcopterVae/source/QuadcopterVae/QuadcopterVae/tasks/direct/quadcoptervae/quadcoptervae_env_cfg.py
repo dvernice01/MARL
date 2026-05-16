@@ -112,7 +112,7 @@ class QuadcoptervaeEnvCfg(DirectRLEnvCfg):
 
     # sensors
     camera = CameraCfg(
-        prim_path="/World/envs/env_.*/Robot/body/front_cam",  # 'body' is the base link of Crazyflie
+        prim_path="/World/envs/env_.*/Robot/body/front_cam",  # aggiungere o togliere /Robot/body prima di front_cam in base a se stai collezionando dati o facendo RL
         update_period=0.1,
         height=270,   # keep small for RL — 480x640 will crush perf at 4096 envs
         width=480,
