@@ -22,6 +22,14 @@ warehouse_detection_dataset/
 environment/quadcopter_rnn/warehouse_3d/
 environment/quadcopter_rnn/warehouse_3d_denser/
 
+environment/quadcopter_hierarchical_control/runs/
+environment/uav_navigation/outputs/
+environment/uav_navigation/wandb/
+environment/uav_navigation/runs/
+environment/uav_navigation/logs/
+
+
+
 # --- Simulation & Video (Isaac Lab / Isaac Sim) ---
 _isaac_sim/
 _ext/

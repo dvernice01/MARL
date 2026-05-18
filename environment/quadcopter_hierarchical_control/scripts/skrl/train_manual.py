@@ -155,17 +155,24 @@ def main(env_cfg, agent_cfg: dict):
     apply_if_present("alive_reward_scale",          env_cfg)
     # death_reward_scale uses the abs trick — negate here
     if "death_reward_scale_abs" in sweep_cfg:
-        env_cfg.death_reward_scale = -sweep_cfg["death_reward_scale_abs"]
+        env_cfg.death_reward_scale = -sweep_cfg["death_reward_scale"]
 
     # ── 3. Apply env/sim overrides ─────────────────────────────────────
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device     = args_cli.device   if args_cli.device   is not None else env_cfg.sim.device
     env_cfg.seed           = args_cli.seed      if args_cli.seed     is not None else env_cfg.seed
 
-    experiment_name = args_cli.experiment_name if args_cli.experiment_name \
-        else datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_Manual_{args_cli.agent.upper()}"
-    log_dir = os.path.join("projects", "quadcopter_hierarchical_control", "logs", "skrl",
-                           "quadcopter_hierarchical_control_direct", experiment_name)
+# Replace the log_dir and experiment_name section (lines 165-168) with:
+
+    # ── Log directory: runs/<sweep_id>/<run_name>/ ────────────────────────
+    sweep_name = wandb.run.sweep_id or "manual_run"
+    run_name = wandb.run.name or wandb.run.id
+    run_dir = os.path.join("runs", sweep_name, run_name)
+    os.makedirs(run_dir, exist_ok=True)
+
+    print(f"[INFO] Run dir: {run_dir}")
+    print(f"[INFO] Config: {dict(sweep_cfg)}")
+
 
     # ── 4. Create environment ──────────────────────────────────────────
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -190,13 +197,65 @@ def main(env_cfg, agent_cfg: dict):
     agent = agent_factory(
         env=env,
         device=device,
-        agent_cfg=sweep_cfg,   # ← sweep config flows in here
-        log_dir=log_dir
+        agent_cfg=sweep_cfg,
+        log_dir=run_dir
     )
+
+        # ── Save reproducibility info ─────────────────────────────────────────
+    repro_dir = os.path.join(run_dir, "reproducibility")
+    os.makedirs(repro_dir, exist_ok=True)
+
+    # Save full config
+    import json
+    repro_data = {
+        "timestamp": datetime.now().isoformat(),
+        "seed": args_cli.seed,
+        "num_envs": env_cfg.scene.num_envs,
+        "task": args_cli.task,
+        "agent": args_cli.agent,
+        "sweep_id": sweep_name,
+        "run_name": run_name,
+        "wandb_config": dict(sweep_cfg),
+        "env_cfg_rewards": {
+            "lin_vel_reward_scale": env_cfg.lin_vel_reward_scale,
+            "ang_vel_reward_scale": env_cfg.ang_vel_reward_scale,
+            "distance_to_goal_reward_scale": env_cfg.distance_to_goal_reward_scale,
+            "alive_reward_scale": env_cfg.alive_reward_scale,
+            "death_reward_scale": env_cfg.death_reward_scale,
+            "rew_scale_action_reg": env_cfg.rew_scale_action_reg,
+        },
+        "packages": {
+            "skrl": skrl.__version__,
+            "torch": torch.__version__,
+        },
+    }
+    with open(os.path.join(repro_dir, "config.json"), "w") as f:
+        json.dump(repro_data, f, indent=4, default=str)
+
+    # Save model architecture
+    with open(os.path.join(repro_dir, "model_architecture.txt"), "w") as f:
+        f.write("Policy Network:\n")
+        f.write(str(agent.policy) + "\n\n")
+        f.write("Value Network:\n")
+        f.write(str(agent.value) + "\n")
+
+    # Copy source files
+    source_dir = os.path.join(repro_dir, "source_code")
+    os.makedirs(source_dir, exist_ok=True)
+    for src in [
+        os.path.abspath(__file__),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents", "ppo_agent.py"),
+    ]:
+        if os.path.exists(src):
+            shutil.copy2(src, source_dir)
+
+    print(f"[INFO] Reproducibility info saved to: {repro_dir}")
+
+
 
     # ── 6. Trainer ────────────────────────────────────────────────────
     rollouts = sweep_cfg.get("rollouts", 64)
-    default_timesteps = 80000
+    default_timesteps = 50000
     trainer_cfg = {
         "timesteps": args_cli.max_iterations * rollouts if args_cli.max_iterations else default_timesteps,
         "headless": True,

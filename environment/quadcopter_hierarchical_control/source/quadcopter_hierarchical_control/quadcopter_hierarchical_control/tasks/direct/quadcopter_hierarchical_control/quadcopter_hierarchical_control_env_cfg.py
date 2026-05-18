@@ -106,4 +106,4 @@ class QuadcopterHierarchicalControlEnvCfg(DirectRLEnvCfg):
     distance_to_goal_reward_scale = 25.0
     rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1
-    death_reward_scale = -2000.0
+    death_reward_scale = -5.0

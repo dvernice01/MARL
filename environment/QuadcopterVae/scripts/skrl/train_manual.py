@@ -253,7 +253,7 @@ def main(env_cfg, agent_cfg: dict):
     apply_if_present("alive_reward_scale",          env_cfg)
     # death_reward_scale uses the abs trick — negate here
     if "death_reward_scale_abs" in sweep_cfg:
-        env_cfg.death_reward_scale = -sweep_cfg["death_reward_scale_abs"]
+        env_cfg.death_reward_scale = -sweep_cfg["death_reward_scale"]
 
     # ── 3. Apply env/sim overrides ─────────────────────────────────────
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
