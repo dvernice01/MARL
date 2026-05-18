@@ -2,85 +2,69 @@ import torch
 import torch.nn as nn
 
 
-"""
-Summary of changes from the 2D version:
-                                                                                          
-  Layer-level swaps                                                                                                                                                    
-  - Conv2d → Conv3d, ConvTranspose2d → ConvTranspose3d, BatchNorm2d → BatchNorm3d                                                                                      
-  - output_padding is now a 3-tuple (d, h, w) instead of (h, w)                                                                                                        
-  - The skip-connection output_padding fix applies per-axis (D, H, W) instead of (H, W)                                                                                
-                                                                                                                                                                       
-  Sizing changes (defaults targeted at local-map input (2, 8, 16, 16))                                                                                                 
-  - input_shape is a parameter (D, H, W) — the 2D version hard-coded (270, 480)                                                                                        
-  - channel_plan uses much smaller channels (16/32/64) — 3D activations cost ~D× more memory                                                                           
-  - Encoder dense path: flat → 256 → 2*latent_dim (vs 2D's flat → 512 → 2*latent_dim)                                                                                  
-  - Decoder dense path: latent → 256 → flat (vs 2D's latent → 512 → 1024 → flat)                                                                                       
-  - Bottleneck shape is configurable (default (2, 4, 4) with 64 channels) and decoupled from the encoder,
-    just like in the 2D version                                  
-                                                                                                                                                                       
-  Deconv configs rewritten for the smaller volumetric problem: bottleneck (2, 4, 4) → output (8, 16, 16).
-  Each upsample is a clean k=4, s=2, p=1 doubling, with refinement layers (k=3, s=1) interleaved for higher
-  num_deconv_layers. Sweepable values are 2, 3, 4, 5.                                                              
-                                                                                                                                                                       
-  Same patterns kept                                                                                                                                                   
-  - ResidualBlock3D with configurable activation (uses ELU in decoder, ReLU in encoder, matching the 2D fix)
-  - Single-activation skip path (no double-activation bug)                                                                                                             
-  - _verify_output_size runs at construction, raises if shapes don't match
-  - VAE3D wrapper preserves the same API: forward / encode / decode / set_inference_mode                                                                               
-                                                                                                                                                                       
-  Default VAE3D() instantiates the network sized for your (2, 8, 16, 16) local maps.                                                                                   
-                                                                                       
-"""
-
 class ResidualBlock3D(nn.Module):
     """
-    3D residual block — refines features WITHOUT changing shape.
-    Pre-activation pattern: act → Conv3d → BN → act → Conv3d → BN → add input.
+    Residual block that refines features WITHOUT changing shape.
+    Input and output are identical in (channels, D, H, W).
+    Uses: Activation → Conv → IN → Activation → Conv → IN → add input
     """
     def __init__(self, channels, activation=nn.ReLU):
         super().__init__()
         self.block = nn.Sequential(
             activation(),
-            nn.Conv3d(channels, channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(channels),
+            nn.Conv3d(channels, channels, 3, padding=1, bias=False),
+            nn.InstanceNorm3d(channels),
             activation(),
-            nn.Conv3d(channels, channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(channels),
+            nn.Conv3d(channels, channels, 3, padding=1, bias=False),
+            nn.InstanceNorm3d(channels),
         )
 
     def forward(self, x):
         return x + self.block(x)
 
 
-class VolumeEncoder(nn.Module):
-    """
-    3D encoder mirroring the 2D ImgEncoder.
-    Input volume: (B, input_dim, D, H, W). Defaults sized for local maps (2, 8, 16, 16).
-    """
-    def __init__(self, input_dim, latent_dim,
-                 input_shape=(8, 16, 16),     # (D, H, W)
-                 num_conv_layers=3,           # ← swept: 2, 3, 4
+class ImgEncoder3D(nn.Module):
+    def __init__(self, input_dim=2,
+                 latent_dim=64,
+                 num_conv_layers=4,
                  use_residual=True,
-                 residual_every=2):
+                 residual_every=2,
+                 use_skip=True):
         super().__init__()
         self.input_dim       = input_dim
         self.latent_dim      = latent_dim
-        self.input_shape     = tuple(input_shape)
         self.num_conv_layers = num_conv_layers
         self.use_residual    = use_residual
         self.residual_every  = residual_every
+        self.use_skip        = use_skip
         self.relu            = nn.ReLU()
 
-        # 3D activations are heavier than 2D — keep channel growth modest
         self.channel_plan = [
-            (input_dim, 16),
-            (16,        32),
+            (input_dim, 32),
+            (32,        32),
             (32,        64),
-            (64,        64),
-            (64,        64),
+            (64,       128),
+            (128,      128),
+            (128,      128),
         ]
 
-        # ── Residual block placement (deep half only) ─────────────────────────
+        # Exactly 2 downsample steps: layer 0 and layer num_conv_layers // 2
+        # Input (2, 8, 16, 16) → stride 2 → (ch, 4, 8, 8) → stride 2 → (ch, 2, 4, 4)
+        self.downsample_at = {0, num_conv_layers // 2}
+
+        # ── Residual block placement ──────────────────────────────────────
+        # Same logic as 2D: only in the deep half, every N layers
+        #
+        # Example with num_conv_layers=4, residual_every=2:
+        #   deep half starts at layer 2
+        #   candidates: 2, 3
+        #   every 2: place at 2 only
+        #
+        # Example with num_conv_layers=6, residual_every=2:
+        #   deep half starts at layer 3
+        #   candidates: 3, 4, 5
+        #   every 2: place at 3, 5
+
         self.residual_at = set()
         if use_residual and num_conv_layers >= 3:
             deep_start = num_conv_layers // 2
@@ -90,11 +74,11 @@ class VolumeEncoder(nn.Module):
                 for i in range(0, len(deep_layers), residual_every)
             )
 
-        print(f"  VolumeEncoder: {num_conv_layers} conv layers | "
+        print(f"  Encoder3D: {num_conv_layers} conv layers | "
               f"residual every {residual_every} deep layers | "
               f"residual at: {sorted(self.residual_at) or 'none'}")
 
-        # ── Build layers ──────────────────────────────────────────────────────
+        # ── Build layers ──────────────────────────────────────────────────
         self.conv_layers = nn.ModuleList()
         self.bn_layers   = nn.ModuleList()
         self.res_blocks  = nn.ModuleDict()
@@ -103,50 +87,45 @@ class VolumeEncoder(nn.Module):
 
         for i in range(num_conv_layers):
             in_ch, out_ch = self.channel_plan[i]
-            stride = 2 if i < 2 else (2 if i % 2 == 0 else 1)
+            stride = 2 if i in self.downsample_at else 1
 
             self.conv_layers.append(
                 nn.Conv3d(in_ch, out_ch, kernel_size=3,
                           stride=stride, padding=1, bias=False)
             )
-            self.bn_layers.append(nn.BatchNorm3d(out_ch))
+            self.bn_layers.append(nn.InstanceNorm3d(out_ch))
 
             if i in self.residual_at:
                 self.res_blocks[str(i)] = ResidualBlock3D(out_ch)
 
-            if i > 0 and i % 2 == 0:
-                prev_ch = self.channel_plan[i - 1][1]
-                if prev_ch != out_ch:
-                    self.skip_layers[str(i)] = nn.Conv3d(
-                        prev_ch, out_ch, kernel_size=1, stride=2, bias=False
-                    )
-                    self.skip_bn[str(i)] = nn.BatchNorm3d(out_ch)
+            if use_skip and i > 0 and stride == 2 and in_ch != out_ch:
+                self.skip_layers[str(i)] = nn.Conv3d(
+                    in_ch, out_ch, kernel_size=1, stride=2, bias=False
+                )
+                self.skip_bn[str(i)] = nn.InstanceNorm3d(out_ch)
 
-        self.flat_size, self.bottleneck_shape = self._compute_flat_size()
-        print(f"  VolumeEncoder bottleneck: {self.bottleneck_shape}, "
-              f"flat: {self.flat_size}")
+        self.flat_size = self._compute_flat_size()
+        print(f"  Encoder3D flat size: {self.flat_size}")
 
-        self.dense0 = nn.Linear(self.flat_size, 256)
-        self.dense1 = nn.Linear(256, 2 * self.latent_dim)
+        self.dense0 = nn.Linear(self.flat_size, 4 * self.latent_dim)
+        self.dense1 = nn.Linear(4 * self.latent_dim, 2 * self.latent_dim)
 
     def _compute_flat_size(self):
         with torch.no_grad():
-            dummy = torch.zeros(1, self.input_dim, *self.input_shape)
+            dummy = torch.zeros(1, self.input_dim, 8, 16, 16)
             x = dummy
             for i, (conv, bn) in enumerate(zip(self.conv_layers, self.bn_layers)):
                 identity = x
-                out = bn(conv(x))
+                x = self.relu(bn(conv(x)))
                 if str(i) in self.skip_layers:
                     skip = self.skip_bn[str(i)](self.skip_layers[str(i)](identity))
-                    x = self.relu(out + skip)
-                else:
-                    x = self.relu(out)
+                    x = self.relu(x + skip)
                 if str(i) in self.res_blocks:
                     x = self.res_blocks[str(i)](x)
-            return x.view(1, -1).shape[1], tuple(x.shape[1:])
+            return x.view(1, -1).shape[1]
 
-    def forward(self, vol):
-        x = vol
+    def forward(self, img):
+        x = img
         for i, (conv, bn) in enumerate(zip(self.conv_layers, self.bn_layers)):
             identity = x
             out = bn(conv(x))
@@ -155,6 +134,7 @@ class VolumeEncoder(nn.Module):
                 x = self.relu(out + skip)
             else:
                 x = self.relu(out)
+
             if str(i) in self.res_blocks:
                 x = self.res_blocks[str(i)](x)
         x = x.view(x.size(0), -1)
@@ -162,65 +142,68 @@ class VolumeEncoder(nn.Module):
         return self.dense1(x)
 
 
-class VolumeDecoder(nn.Module):
-    """
-    3D decoder mirroring the 2D ImgDecoder.
-    Default sizing: bottleneck (64, 2, 4, 4) → output (output_dim, 8, 16, 16).
-    The deconv configs are decoupled from the encoder — connection is via the
-    latent space, exactly like the 2D version.
-    """
+class ImgDecoder3D(nn.Module):
     def __init__(self, output_dim=2, latent_dim=64, with_logits=False,
-                 output_shape=(8, 16, 16),       # (D, H, W) of reconstruction
-                 bottleneck_shape=(2, 4, 4),     # (D, H, W) input to first deconv
-                 bottleneck_channels=64,
-                 num_deconv_layers=3,            # ← swept: 2, 3, 4, 5
+                 num_deconv_layers=4,
                  use_residual=True,
-                 residual_every=2):
+                 residual_every=2,
+                 use_skip=True):
         super().__init__()
-        self.with_logits         = with_logits
-        self.n_channels          = output_dim
-        self.output_shape        = tuple(output_shape)
-        self.bottleneck_shape    = tuple(bottleneck_shape)
-        self.bottleneck_channels = bottleneck_channels
-        self.num_deconv_layers   = num_deconv_layers
-        self.use_residual        = use_residual
-        self.residual_every      = residual_every
+        self.with_logits       = with_logits
+        self.output_dim        = output_dim
+        self.num_deconv_layers = num_deconv_layers
+        self.use_residual      = use_residual
+        self.residual_every    = residual_every
         self.elu = nn.ELU()
 
-        # ── Dense layers — expand latent → flat bottleneck volume ─────────────
-        bD, bH, bW = self.bottleneck_shape
-        flat = bottleneck_channels * bD * bH * bW
+        # ── Dense layers ──────────────────────────────────────────────────
+        self.dense0 = nn.Linear(latent_dim, latent_dim * 2)
+        self.dense1 = nn.Linear(latent_dim * 2, latent_dim * 4)
+        self.dense2 = nn.Linear(latent_dim * 4, 128 * 2 * 4 * 4)
 
-        self.dense0 = nn.Linear(latent_dim, 256)
-        self.dense1 = nn.Linear(256, flat)
+        # ── Deconv layer pool ─────────────────────────────────────────────
+        # Seed shape: (128, 2, 4, 4)
+        # Target:     (output_dim, 8, 16, 16)
+        # Need: 2→8 (×4), 4→16 (×4) → exactly 2 stride-2 deconv layers
+        #
+        # ConvTranspose3d k=4, s=2, p=1, op=0 → doubles all spatial dims
+        # ConvTranspose3d k=3, s=1, p=1, op=0 → same dims (refinement)
+        #
+        # Spatial progression (4-layer version):
+        # seed:     (128, 2,  4,  4)
+        # deconv0:  (128, 2,  4,  4)  stride=1  refinement
+        # deconv1:  ( 64, 4,  8,  8)  stride=2  ×2
+        # deconv2:  ( 16, 8, 16, 16)  stride=2  ×2
+        # deconv3:  ( od, 8, 16, 16)  stride=1  final output
 
-        # ── Deconv layer pool ─────────────────────────────────────────────────
-        # Each entry: (in_ch, out_ch, kernel, stride, padding, output_padding 3-tuple)
-        # Designed for bottleneck (2, 4, 4) → output (8, 16, 16).
-        # Final layer maps to output_dim.
-        c = bottleneck_channels
+        od = output_dim
         self.ALL_DECONV_CFGS = {
-            2: [
-                (c,          c // 2, 4, 2, 1, (0, 0, 0)),  # x2 spatial
-                (c // 2, output_dim, 4, 2, 1, (0, 0, 0)),  # x2 — final
-            ],
+            # (in_ch, out_ch, kernel, stride, padding, output_padding)
             3: [
-                (c,             c, 3, 1, 1, (0, 0, 0)),  # refinement
-                (c,        c // 2, 4, 2, 1, (0, 0, 0)),  # x2
-                (c // 2, output_dim, 4, 2, 1, (0, 0, 0)),  # x2 — final
+                (128,  64, 4, 2, 1, 0),   # (64,  4, 8, 8)     ×2
+                ( 64,  16, 4, 2, 1, 0),   # (16,  8, 16, 16)   ×2
+                ( 16,  od, 3, 1, 1, 0),   # (od,  8, 16, 16)   final
             ],
             4: [
-                (c,             c, 3, 1, 1, (0, 0, 0)),  # refinement
-                (c,        c // 2, 4, 2, 1, (0, 0, 0)),  # x2
-                (c // 2,   c // 2, 3, 1, 1, (0, 0, 0)),  # refinement
-                (c // 2, output_dim, 4, 2, 1, (0, 0, 0)),  # x2 — final
+                (128, 128, 3, 1, 1, 0),   # (128, 2, 4, 4)     refinement
+                (128,  64, 4, 2, 1, 0),   # (64,  4, 8, 8)     ×2
+                ( 64,  16, 4, 2, 1, 0),   # (16,  8, 16, 16)   ×2
+                ( 16,  od, 3, 1, 1, 0),   # (od,  8, 16, 16)   final
             ],
             5: [
-                (c,             c, 3, 1, 1, (0, 0, 0)),  # refinement
-                (c,        c // 2, 4, 2, 1, (0, 0, 0)),  # x2
-                (c // 2,   c // 2, 3, 1, 1, (0, 0, 0)),  # refinement
-                (c // 2,   c // 4, 4, 2, 1, (0, 0, 0)),  # x2
-                (c // 4, output_dim, 3, 1, 1, (0, 0, 0)),  # final refinement
+                (128, 128, 3, 1, 1, 0),   # (128, 2, 4, 4)     refinement
+                (128,  64, 4, 2, 1, 0),   # (64,  4, 8, 8)     ×2
+                ( 64,  64, 3, 1, 1, 0),   # (64,  4, 8, 8)     refinement
+                ( 64,  16, 4, 2, 1, 0),   # (16,  8, 16, 16)   ×2
+                ( 16,  od, 3, 1, 1, 0),   # (od,  8, 16, 16)   final
+            ],
+            6: [
+                (128, 128, 3, 1, 1, 0),   # (128, 2, 4, 4)     refinement
+                (128,  64, 4, 2, 1, 0),   # (64,  4, 8, 8)     ×2
+                ( 64,  64, 3, 1, 1, 0),   # (64,  4, 8, 8)     refinement
+                ( 64,  32, 4, 2, 1, 0),   # (32,  8, 16, 16)   ×2
+                ( 32,  16, 3, 1, 1, 0),   # (16,  8, 16, 16)   refinement
+                ( 16,  od, 3, 1, 1, 0),   # (od,  8, 16, 16)   final
             ],
         }
 
@@ -232,22 +215,20 @@ class VolumeDecoder(nn.Module):
 
         deconv_cfgs = self.ALL_DECONV_CFGS[num_deconv_layers]
 
-        # ── Residual placement — only on non-final upsample layers ────────────
-        upsample_idxs = [
-            i for i, (_, _, _, s, _, _) in enumerate(deconv_cfgs)
-            if s > 1 and i < len(deconv_cfgs) - 1
-        ]
+        # ── Residual placement (same logic as 2D) ────────────────────────
         self.residual_at = set()
-        if use_residual and len(upsample_idxs) > 0:
+        if use_residual and num_deconv_layers >= 3:
+            deep_start = num_deconv_layers // 2
+            deep_layers = list(range(deep_start, num_deconv_layers))
             self.residual_at = set(
-                upsample_idxs[i]
-                for i in range(0, len(upsample_idxs), residual_every)
+                deep_layers[i]
+                for i in range(0, len(deep_layers), residual_every)
             )
 
-        print(f"  VolumeDecoder: {num_deconv_layers} deconv layers | "
+        print(f"  Decoder3D: {num_deconv_layers} deconv layers | "
               f"residual at: {sorted(self.residual_at) or 'none'}")
 
-        # ── Build layers ──────────────────────────────────────────────────────
+        # ── Build layers ──────────────────────────────────────────────────
         self.deconv_layers = nn.ModuleList()
         self.deconv_bn     = nn.ModuleList()
         self.res_blocks    = nn.ModuleDict()
@@ -262,41 +243,42 @@ class VolumeDecoder(nn.Module):
                                    stride=s, padding=p,
                                    output_padding=op, bias=False)
             )
+            # no norm on final layer — sigmoid handles normalization
             self.deconv_bn.append(
-                nn.BatchNorm3d(out_ch) if not is_final else nn.Identity()
+                nn.InstanceNorm3d(out_ch) if not is_final else nn.Identity()
             )
 
             if i in self.residual_at:
                 self.res_blocks[str(i)] = ResidualBlock3D(out_ch, activation=nn.ELU)
 
-            # ── Skip connection — generalised 2D rule to 3D output_padding ────
-            if in_ch != out_ch and s > 1 and not is_final:
-                op_d = op[0] + (k - 1) - 2 * p
-                op_h = op[1] + (k - 1) - 2 * p
-                op_w = op[2] + (k - 1) - 2 * p
-                if 0 <= op_d < s and 0 <= op_h < s and 0 <= op_w < s:
-                    skip_k, skip_p, skip_op = 1, 0, (op_d, op_h, op_w)
+            # skip connection when channels change, stride > 1, and not final
+            if use_skip and in_ch != out_ch and s > 1 and not is_final:
+                skip_op = op + (k - 1) - 2 * p
+                if 0 <= skip_op < s:
+                    skip_k, skip_p, skip_op_final = 1, 0, skip_op
                 else:
-                    skip_k, skip_p, skip_op = k, p, op  # fallback: same kernel as main
+                    skip_k, skip_p, skip_op_final = k, p, op
                 self.skip_layers[str(i)] = nn.ConvTranspose3d(
                     in_ch, out_ch, kernel_size=skip_k,
-                    stride=s, padding=skip_p, output_padding=skip_op, bias=False
+                    stride=s, padding=skip_p,
+                    output_padding=skip_op_final, bias=False
                 )
-                self.skip_bn[str(i)] = nn.BatchNorm3d(out_ch)
+                self.skip_bn[str(i)] = nn.InstanceNorm3d(out_ch)
 
-        # ── Verify output size ────────────────────────────────────────────────
+        # ── Verify output size ────────────────────────────────────────────
         self._verify_output_size()
 
     def _verify_output_size(self):
-        """Sanity check — confirm we reach exactly (1, output_dim, *output_shape)."""
+        """Sanity check — confirm we reach exactly (output_dim, 8, 16, 16)."""
         with torch.no_grad():
-            dummy = torch.zeros(1, self.bottleneck_channels, *self.bottleneck_shape)
+            dummy = torch.zeros(1, 128, 2, 4, 4)
             x = dummy
             for i, (deconv, bn) in enumerate(
                 zip(self.deconv_layers, self.deconv_bn)
             ):
                 identity = x
-                out = bn(deconv(x))
+                out = deconv(x)
+                out = bn(out)
 
                 if str(i) in self.skip_layers:
                     skip = self.skip_bn[str(i)](
@@ -312,25 +294,30 @@ class VolumeDecoder(nn.Module):
                 if str(i) in self.res_blocks:
                     x = self.res_blocks[str(i)](x)
 
-        expected = (1, self.n_channels, *self.output_shape)
+        expected = (1, self.output_dim, 8, 16, 16)
         if tuple(x.shape) != expected:
             raise RuntimeError(
-                f"Decoder output shape {tuple(x.shape)} != {expected}. "
-                f"Fix the deconv configs for num_deconv_layers={self.num_deconv_layers}."
+                f"Decoder3D output shape {tuple(x.shape)} != {expected}. "
+                f"Fix the deconv configs for "
+                f"num_deconv_layers={self.num_deconv_layers}."
             )
-        print(f"  VolumeDecoder output verified: {tuple(x.shape)} ✅")
+        print(f"  Decoder3D output verified: {tuple(x.shape)} ✓")
 
     def forward(self, z):
+        # fixed dense expansion
         x = self.elu(self.dense0(z))
         x = self.elu(self.dense1(x))
-        x = x.view(x.size(0), self.bottleneck_channels, *self.bottleneck_shape)
+        x = self.elu(self.dense2(x))
+        x = x.view(x.size(0), 128, 2, 4, 4)
 
+        # variable deconv
         for i, (deconv, bn) in enumerate(
             zip(self.deconv_layers, self.deconv_bn)
         ):
             is_final = (i == len(self.deconv_layers) - 1)
             identity = x
-            out = bn(deconv(x))
+            out = deconv(x)
+            out = bn(out)
 
             if str(i) in self.skip_layers:
                 skip = self.skip_bn[str(i)](
@@ -361,64 +348,55 @@ class Lambda(nn.Module):
 
 
 class VAE3D(nn.Module):
-    """
-    3D variational autoencoder mirroring the 2D VAE.
-    Default sizing matches local map data: input (input_dim=2, 8, 16, 16).
-    """
     def __init__(self, input_dim=2, latent_dim=64, with_logits=False,
                  inference_mode=False,
-                 input_shape=(8, 16, 16),
-                 num_conv_layers=3,            # ← swept
+                 num_conv_layers=4,
                  use_residual=True,
                  residual_every=2,
-                 num_deconv_layers=3,          # ← swept
-                 bottleneck_channels=64,
-                 bottleneck_shape=(2, 4, 4)):
+                 num_deconv_layers=4,
+                 use_skip=True):
         super().__init__()
         self.with_logits    = with_logits
         self.input_dim      = input_dim
         self.latent_dim     = latent_dim
         self.inference_mode = inference_mode
 
-        self.encoder = VolumeEncoder(
+        self.encoder = ImgEncoder3D(
             input_dim       = input_dim,
             latent_dim      = latent_dim,
-            input_shape     = input_shape,
             num_conv_layers = num_conv_layers,
             use_residual    = use_residual,
             residual_every  = residual_every,
+            use_skip        = use_skip,
         )
-        self.vol_decoder = VolumeDecoder(
-            output_dim          = input_dim,
-            latent_dim          = latent_dim,
-            with_logits         = with_logits,
-            output_shape        = input_shape,
-            bottleneck_shape    = bottleneck_shape,
-            bottleneck_channels = bottleneck_channels,
-            num_deconv_layers   = num_deconv_layers,
-            use_residual        = use_residual,
-            residual_every      = residual_every,
+        self.decoder = ImgDecoder3D(
+            output_dim        = input_dim,
+            latent_dim        = latent_dim,
+            with_logits       = with_logits,
+            num_deconv_layers = num_deconv_layers,
+            use_residual      = use_residual,
+            residual_every    = residual_every,
+            use_skip          = use_skip,
         )
 
         self.mean_params   = Lambda(lambda x: x[:, :latent_dim])
         self.logvar_params = Lambda(lambda x: x[:, latent_dim:])
 
-    def forward(self, vol):
-        z = self.encoder(vol)
+    def forward(self, x):
+        z = self.encoder(x)
 
         mean   = self.mean_params(z)
-        # clamp logvar — prevents std from exploding or vanishing
         logvar = torch.clamp(self.logvar_params(z), min=-4.0, max=4.0)
 
         std = torch.exp(0.5 * logvar)
         eps = torch.zeros_like(std) if self.inference_mode else torch.randn_like(std)
         z_sampled = mean + eps * std
 
-        vol_recon = self.vol_decoder(z_sampled)
-        return vol_recon, mean, logvar, z_sampled
+        recon = self.decoder(z_sampled)
+        return recon, mean, logvar, z_sampled
 
-    def encode(self, vol):
-        z      = self.encoder(vol)
+    def encode(self, x):
+        z      = self.encoder(x)
         mean   = self.mean_params(z)
         logvar = torch.clamp(self.logvar_params(z), min=-4.0, max=4.0)
         std    = torch.exp(0.5 * logvar)
@@ -426,10 +404,10 @@ class VAE3D(nn.Module):
         return mean + eps * std, mean, std
 
     def decode(self, z):
-        vol_recon = self.vol_decoder(z)
+        recon = self.decoder(z)
         if self.with_logits:
-            return torch.sigmoid(vol_recon)
-        return vol_recon
+            return torch.sigmoid(recon)
+        return recon
 
     def set_inference_mode(self, mode):
         self.inference_mode = mode
