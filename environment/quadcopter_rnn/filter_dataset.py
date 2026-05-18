@@ -168,18 +168,34 @@ def main():
         print("\n[dry-run] No files copied.")
         return
 
-    # Save filtered samples
+    # Save filtered samples (skip duplicates already in output)
     os.makedirs(args.output, exist_ok=True)
 
-    existing = [f for f in os.listdir(args.output) if f.endswith(".npy")]
-    start_idx = len(existing)
+    import hashlib
+    existing_hashes = set()
+    existing_files = [f for f in os.listdir(args.output) if f.endswith(".npy")]
+    for f in existing_files:
+        d = np.load(os.path.join(args.output, f))
+        existing_hashes.add(hashlib.md5(d.tobytes()).hexdigest())
 
-    for i, sample in enumerate(kept):
-        out_path = os.path.join(args.output, f"sample_{start_idx + i:06d}.npy")
+    start_idx = len(existing_files)
+    written = 0
+    skipped_dup = 0
+    for sample in kept:
+        h = hashlib.md5(sample["data"].tobytes()).hexdigest()
+        if h in existing_hashes:
+            skipped_dup += 1
+            continue
+        out_path = os.path.join(args.output, f"sample_{start_idx + written:06d}.npy")
         np.save(out_path, sample["data"])
+        existing_hashes.add(h)
+        written += 1
 
-    print(f"\nAppended {len(kept)} samples to {args.output} "
-        f"(indices {start_idx}–{start_idx + len(kept) - 1})")
+    print(f"\nAppended {written} new samples to {args.output} "
+          f"(skipped {skipped_dup} duplicates already present)")
+    if written > 0:
+        print(f"  Indices {start_idx}–{start_idx + written - 1}")
+    print(f"  Total samples in output: {len(existing_files) + written}")
 
 
 if __name__ == "__main__":

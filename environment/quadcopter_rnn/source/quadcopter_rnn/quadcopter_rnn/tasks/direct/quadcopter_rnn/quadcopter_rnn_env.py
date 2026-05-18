@@ -432,6 +432,7 @@ class QuadcopterRnnEnv(DirectRLEnv):
         obs = torch.cat(
             [
                 self.rel_pos_b,
+                self._prev_actions,
                 self._robot.data.root_lin_vel_b,
                 self._robot.data.root_ang_vel_b,
                 self.distance_to_bounds_x.reshape(-1, 1),

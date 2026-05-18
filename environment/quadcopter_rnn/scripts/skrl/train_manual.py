@@ -160,6 +160,9 @@ def main(env_cfg, agent_cfg: dict):
     # ── 3. Apply env/sim overrides ─────────────────────────────────────
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device     = args_cli.device   if args_cli.device   is not None else env_cfg.sim.device
+    if args_cli.seed == -1:
+        import random
+        args_cli.seed = random.randint(0, 10000)
     env_cfg.seed           = args_cli.seed      if args_cli.seed     is not None else env_cfg.seed
 
     experiment_name = args_cli.experiment_name if args_cli.experiment_name \

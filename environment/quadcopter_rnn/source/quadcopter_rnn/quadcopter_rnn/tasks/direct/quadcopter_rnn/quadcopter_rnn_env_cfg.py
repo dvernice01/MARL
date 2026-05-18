@@ -55,7 +55,7 @@ class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
     decimation= 10
     decimation_low_level = 2
     action_space = 4
-    observation_space = 11
+    observation_space = 15
     state_space = 0
     debug_vis = True
 
