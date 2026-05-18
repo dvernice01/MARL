@@ -12,42 +12,42 @@ metric:
 parameters:
   # Learning parameters
   learning_rate:
-    values: [1e-3,1e-4,1e-5]
+    values: [1e-5]
   
   learning_epochs:
-    values: [5, 8, 10]
+    values: [8]
   
   rollouts:
-    values: [32, 64, 128]
+    values: [64]
   
   # # PPO specific
   # discount_factor:
   #   values: [0.99] # non fare lo sweep mantieni 0.99
   
   entropy_loss_scale:
-    values: [0.001, 0.01]
+    values: [0.001]
 
   # Reward scales
   lin_vel_reward_scale:
-    values: [0.1, 1.0]
+    values: [0.1]
 
   ang_vel_reward_scale:
-    values: [0.1, 1.0]
+    values: [0.1]
 
   rew_scale_action_reg:
-    values: [0.0, 0.1, 5.0]
+    values: [0.1]
   
   distance_to_goal_reward_scale:
-    values: [1.0, 10, 25, 50]
+    values: [25]
   
   alive_reward_scale:
-    values: [0.1, 5.0]
+    values: [0.1]
 
   death_reward_scale:
-    values: [-50, -2000]
+    values: [-2000]
 
   hidden_size:
-    values: [256, 512]
+    values: [256]
 
 
 
