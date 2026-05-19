@@ -316,8 +316,8 @@ class QuadcopterRnnEnv(DirectRLEnv):
     def _build_local_combined_map(self, env_id: int) -> torch.Tensor:
         """
         Returns (2, 8, 16, 16):
-          channel 0 = local SVS  (Shannon entropy of visit distribution)
-          channel 1 = local binary occupancy
+          channel 0 = local binary occupancy
+          channel 1 = local SVS  (Shannon entropy of visit distribution)
         """
         local_svs = self._build_local_svs_map(env_id)   # (8, 16, 16)
         local_occ = self._build_local_occ_map(env_id)   # (8, 16, 16)

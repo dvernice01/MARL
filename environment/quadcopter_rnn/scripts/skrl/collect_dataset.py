@@ -40,6 +40,10 @@ parser.add_argument("--min_svs_voxels", type=int, default=5,
 parser.add_argument("--max_poor_samples", type=int, default=20,
                     help="Max number of SVS-poor samples to keep (e.g. 20 per 1000); "
                          "once reached, further SVS-poor samples are skipped")
+parser.add_argument("--respawn_every", type=int, default=10,
+                    help="Hops a drone chains (accumulating visit counts → richer SVS) "
+                         "before a forced respawn that wipes counts. 1 = respawn every "
+                         "hop (poor SVS); larger = richer SVS, more OCC spatial correlation")
 parser.add_argument("--ml_framework", type=str, default="torch")
 parser.add_argument("--algorithm", type=str, default="PPO")
 parser.add_argument("--real-time", action="store_true", default=False)
@@ -296,6 +300,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
     min_occ = args_cli.min_occ_voxels
     min_svs = args_cli.min_svs_voxels
     max_poor = args_cli.max_poor_samples
+    respawn_every = args_cli.respawn_every
 
     obs, _ = env.reset()
 
@@ -318,6 +323,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
             total_poor_saved += 1
 
     steps_on_goal = torch.zeros(num_envs, device=device)
+    hops_since_respawn = [0] * num_envs   # chained hops since last visit-count wipe
     total_saved = existing
     total_reached = 0
     total_timeout = 0
@@ -343,17 +349,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
             steps_on_goal += 1
             step_count += 1
 
-            # True if any env was teleported/respawned this iteration → obs is
-            # stale for that env and must be rebuilt before the next act().
+            # Set True whenever an env's goal changed or it was respawned this
+            # iteration → its obs is stale and must be rebuilt before next act().
             did_reset = False
 
             for eid in range(num_envs):
                 is_term = bool(terminated[eid]) if terminated is not None else False
                 is_trunc = bool(truncated[eid]) if truncated is not None else False
 
-                # Env auto-resets a done env inside env.step(); just pick a
-                # fresh goal relative to its new spawn position.
+                # Env auto-resets a done env inside env.step() (this also wiped
+                # its visit counts); restart the hop chain and pick a fresh
+                # goal relative to its new spawn position.
                 if is_term or is_trunc:
+                    hops_since_respawn[eid] = 0
                     goal = pick_goal_in_local_map(raw_env, eid, device)
                     raw_env._desired_pos_w[eid] = goal
                     steps_on_goal[eid] = 0
@@ -403,10 +411,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
                     else:
                         total_skipped_empty += 1
 
-                    # Respawn this env at a fresh random in-bounds location so
-                    # the next sample is spatially independent (avoids the drone
-                    # lingering near one structure and re-cropping the same map).
-                    raw_env._reset_idx(torch.tensor([eid], device=device))
+                    # Chain hops so global_visit_counts accumulates → the SVS
+                    # crop reflects real local exploration, not one ~2 m stub.
+                    # Force a respawn (which wipes visit counts) only every
+                    # `respawn_every` hops, so the drone still covers different
+                    # warehouse regions for OCC variety.
+                    hops_since_respawn[eid] += 1
+                    if hops_since_respawn[eid] >= respawn_every:
+                        raw_env._reset_idx(torch.tensor([eid], device=device))
+                        hops_since_respawn[eid] = 0
                     goal = pick_goal_in_local_map(raw_env, eid, device)
                     raw_env._desired_pos_w[eid] = goal
                     steps_on_goal[eid] = 0
