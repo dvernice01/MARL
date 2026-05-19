@@ -404,10 +404,11 @@ class VAE3D(nn.Module):
         return mean + eps * std, mean, std
 
     def decode(self, z):
-        recon = self.decoder(z)
-        if self.with_logits:
-            return torch.sigmoid(recon)
-        return recon
+        # Same convention as forward()/the decoder:
+        #   with_logits=True  → raw logits (caller applies sigmoid)
+        #   with_logits=False → probabilities (sigmoid already applied)
+        return self.decoder(z)
+
 
     def set_inference_mode(self, mode):
         self.inference_mode = mode

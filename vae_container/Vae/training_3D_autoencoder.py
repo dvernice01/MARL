@@ -13,7 +13,6 @@ from autoencoder3D import VAE3D
 import wandb
 import yaml
 
-MAX_SVS = 1.0  # SVS values already in [0, ~1] after entropy normalization
 SEED = 42
 
 random.seed(SEED)
@@ -58,84 +57,114 @@ class LocalMap3DDataset(Dataset):
         return torch.from_numpy(combined).float()
 
 
-def make_loaders(data_dir, val_ratio=0.1, batch_size=32, num_workers=2):
+def make_loaders(data_dir, val_ratio=0.1, test_ratio=0.1,
+                 batch_size=32, num_workers=2):
+    """Train/val/test split. SVS normalization stat is computed on TRAIN ONLY
+    so no val/test information leaks into the input scaling."""
     all_files = sorted([
         os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(".npy")
     ])
-
     if len(all_files) == 0:
         raise RuntimeError(f"No .npy files found in {data_dir}")
 
-    # Compute global SVS max for normalization
-    svs_max = 0.0
-    for path in all_files:
-        d = np.load(path)
-        svs_max = max(svs_max, d[1].max())
-    svs_max = max(svs_max, 1e-8)
-    print(f"  SVS max across dataset: {svs_max:.6f}")
-
-    # Train/val split
     n_total = len(all_files)
-    n_val = max(1, int(n_total * val_ratio))
-    n_train = n_total - n_val
-
     indices = list(range(n_total))
     random.Random(42).shuffle(indices)
+
+    n_test = max(1, int(n_total * test_ratio))
+    n_val = max(1, int(n_total * val_ratio))
+    n_train = n_total - n_val - n_test
+
     train_files = [all_files[i] for i in indices[:n_train]]
-    val_files = [all_files[i] for i in indices[n_train:]]
+    val_files = [all_files[i] for i in indices[n_train:n_train + n_val]]
+    test_files = [all_files[i] for i in indices[n_train + n_val:]]
 
-    train_set = LocalMap3DDataset(train_files, svs_max=svs_max)
-    val_set = LocalMap3DDataset(val_files, svs_max=svs_max)
+    # SVS max from TRAIN ONLY (no leakage)
+    svs_max = 1e-8
+    for path in train_files:
+        svs_max = max(svs_max, float(np.load(path)[1].max()))
+    print(f"  SVS max (train only): {svs_max:.6f}")
+    print(f"  Train: {n_train} | Val: {n_val} | Test: {n_test}")
 
-    print(f"  Train: {n_train} | Val: {n_val}")
+    def mk(files, shuffle):
+        return DataLoader(
+            LocalMap3DDataset(files, svs_max=svs_max),
+            batch_size=batch_size, shuffle=shuffle,
+            num_workers=num_workers, pin_memory=True, worker_init_fn=seed_worker,
+        )
 
-    train_loader = DataLoader(
-        train_set, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True, worker_init_fn=seed_worker
-    )
-    val_loader = DataLoader(
-        val_set, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True, worker_init_fn=seed_worker
-    )
-    return train_loader, val_loader, svs_max
+    return mk(train_files, True), mk(val_files, False), mk(test_files, False), svs_max
 
 
-# ── LOSS ─────────────────────────────────────────────────────────────────────
+# ── LOSS (autoencoder, no KL) ────────────────────────────────────────────────
 
-def vae3d_loss(recon, target, mean, logvar, beta,
-               occ_weight=1.0, svs_weight=1.0, use_free_bits=False):
-    # Channel 0: occupancy (binary) → BCE
-    occ_recon = recon[:, 0:1]
+def ae_loss(recon, target, occ_weight=1.0, svs_weight=1.0,
+            occ_pos_weight=12.0, svs_nonzero_weight=50.0):
+    """recon = raw decoder output (model built with with_logits=True → no final
+    sigmoid). channel 0 = occupancy (binary), channel 1 = SVS ([0,1]).
+
+    The dataset is extremely imbalanced (~7% occupied, <1% SVS-nonzero), so a
+    plain BCE/MSE collapses to predicting zeros. Occupancy uses a stable,
+    pos-weighted BCE-with-logits; SVS uses an MSE that upweights the rare
+    nonzero voxels.
+    """
+    occ_logits = recon[:, 0:1]
     occ_target = target[:, 0:1]
-    occ_loss = F.binary_cross_entropy(occ_recon, occ_target, reduction='mean')
+    pw = torch.tensor(occ_pos_weight, device=recon.device)
+    occ_loss = F.binary_cross_entropy_with_logits(occ_logits, occ_target, pos_weight=pw)
 
-    # Channel 1: SVS (continuous [0,1]) → MSE
-    svs_recon = recon[:, 1:2]
+    svs_pred = torch.sigmoid(recon[:, 1:2])          # logits → [0,1]
     svs_target = target[:, 1:2]
-    svs_loss = F.mse_loss(svs_recon, svs_target, reduction='mean')
+    w = 1.0 + svs_nonzero_weight * (svs_target > 0).float()
+    svs_loss = (w * (svs_pred - svs_target) ** 2).sum() / w.sum()
 
-    recon_loss = occ_weight * occ_loss + svs_weight * svs_loss
-
-    # KL divergence
-    kl_per_dim = -0.5 * (1 + logvar - mean.pow(2) - logvar.exp())
-    if use_free_bits:
-        kl_per_dim = torch.clamp(kl_per_dim, min=0.5)
-    kl_loss = kl_per_dim.mean()
-
-    total = recon_loss + beta * kl_loss
-
-    if torch.isnan(total):
-        zero = torch.tensor(0.0, requires_grad=True, device=recon.device)
-        return zero, zero, zero, zero, zero
-
-    return total, recon_loss, occ_loss, svs_loss, kl_loss
+    total = occ_weight * occ_loss + svs_weight * svs_loss
+    return total, occ_loss, svs_loss
 
 
-def build_beta_schedule(warmup_end=70, beta_max=10.0, total_epochs=200):
-    schedule = np.zeros(total_epochs)
-    schedule[:warmup_end] = np.linspace(0.0, beta_max, warmup_end)
-    schedule[warmup_end:] = beta_max
-    return schedule
+@torch.no_grad()
+def recon_metrics(recon, target, occ_thresh=0.5):
+    """Threshold-based metrics — loss alone is misleading on imbalanced data
+    (an all-zeros model has near-zero loss but IoU≈0)."""
+    occ_p = torch.sigmoid(recon[:, 0:1]) > occ_thresh
+    occ_t = target[:, 0:1] > 0.5
+    inter = (occ_p & occ_t).sum().float()
+    union = (occ_p | occ_t).sum().float().clamp(min=1)
+    tp = inter
+    fp = (occ_p & ~occ_t).sum().float()
+    fn = (~occ_p & occ_t).sum().float()
+
+    svs_p = torch.sigmoid(recon[:, 1:2])
+    svs_t = target[:, 1:2]
+    m = svs_t > 0
+    svs_mse_nz = ((svs_p - svs_t) ** 2)[m].mean().item() if m.any() else 0.0
+
+    return {
+        "occ_iou": (inter / union).item(),
+        "occ_f1": (2 * tp / (2 * tp + fp + fn).clamp(min=1)).item(),
+        "svs_mse_nonzero": svs_mse_nz,
+    }
+
+
+# ── TEST (frozen split, evaluated once at the end) ───────────────────────────
+
+@torch.no_grad()
+def run_test(model, test_loader, device, occ_weight=1.0, svs_weight=1.0):
+    model.eval()
+    keys = ["loss", "occ", "svs", "occ_iou", "occ_f1", "svs_mse_nonzero"]
+    tot = {k: 0.0 for k in keys}
+    for batch in test_loader:
+        batch = batch.to(device)
+        recon, *_ = model(batch)
+        loss, occ_l, svs_l = ae_loss(recon, batch, occ_weight, svs_weight)
+        m = recon_metrics(recon, batch)
+        tot["loss"] += loss.item()
+        tot["occ"] += occ_l.item()
+        tot["svs"] += svs_l.item()
+        for k in ("occ_iou", "occ_f1", "svs_mse_nonzero"):
+            tot[k] += m[k]
+    nb = len(test_loader)
+    return {f"test/{k}": v / nb for k, v in tot.items()}
 
 
 # ── LATENCY ──────────────────────────────────────────────────────────────────
@@ -192,7 +221,8 @@ def visualize_3d(model, dataset, device, epoch, save_dir="debug_epochs"):
         for col, idx in enumerate(indices):
             sample = dataset[idx]  # (2, 8, 16, 16)
             recon, *_ = model(sample.unsqueeze(0).to(device))
-            recon = recon.squeeze(0).cpu().numpy()
+            # model outputs logits (with_logits=True) → squash for display
+            recon = torch.sigmoid(recon).squeeze(0).cpu().numpy()
             target = sample.numpy()
 
             fig = plt.figure(figsize=(16, 8))
@@ -205,7 +235,6 @@ def visualize_3d(model, dataset, device, epoch, save_dir="debug_epochs"):
                 occ = data[0]
                 svs = data[1]
 
-                # Occupancy 3D scatter
                 ax = fig.add_subplot(2, 3, row * 3 + 1, projection="3d")
                 iz, iy, ix = np.where(occ > 0.5)
                 ax.scatter(ix, iy, iz, s=20, c="red", alpha=0.4, marker="s")
@@ -213,7 +242,6 @@ def visualize_3d(model, dataset, device, epoch, save_dir="debug_epochs"):
                 ax.set_title(f"{label} OCC ({len(iz)} voxels)")
                 ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
 
-                # SVS 3D scatter
                 ax2 = fig.add_subplot(2, 3, row * 3 + 2, projection="3d")
                 threshold = max(svs.max() * 0.05, 1e-6)
                 iz2, iy2, ix2 = np.where(svs > threshold)
@@ -226,7 +254,6 @@ def visualize_3d(model, dataset, device, epoch, save_dir="debug_epochs"):
                 ax2.set_title(f"{label} SVS")
                 ax2.set_xlabel("x"); ax2.set_ylabel("y"); ax2.set_zlabel("z")
 
-                # Center horizontal slice (z = NZ//2)
                 ax3 = fig.add_subplot(2, 3, row * 3 + 3)
                 nz = occ.shape[0]
                 slice_z = nz // 2
@@ -258,20 +285,23 @@ def main():
     print(f"Device: {device}")
 
     # ── data ──────────────────────────────────────────────────────────────
-    train_loader, val_loader, svs_max = make_loaders(
-        data_dir=cfg.data_dir,
+    train_loader, val_loader, test_loader, svs_max = make_loaders(
+        data_dir="/workspace/environment/vae_container/Vae/dataset_3d_collection",
         val_ratio=0.1,
+        test_ratio=0.1,
         batch_size=cfg.batch_size,
         num_workers=2,
     )
     val_data = val_loader.dataset
 
-    # ── model ─────────────────────────────────────────────────────────────
+    # ── model (deterministic autoencoder) ─────────────────────────────────
+    #   inference_mode=True → z = mean, no sampling (plain AE, no KL).
+    #   with_logits=True    → decoder returns raw logits (stable BCE).
     model = VAE3D(
         input_dim=2,
         latent_dim=cfg.latent_dim,
-        with_logits=False,
-        inference_mode=False,
+        with_logits=True,
+        inference_mode=True,
         num_conv_layers=cfg.num_conv_layers,
         use_residual=cfg.use_residual,
         residual_every=cfg.residual_every,
@@ -281,131 +311,121 @@ def main():
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=15, verbose=True
+        optimizer, mode="min", factor=0.5, patience=15
     )
 
     epochs = cfg.epochs
-    beta_schedule = build_beta_schedule(
-        warmup_end=int(epochs * 0.7),
-        beta_max=cfg.beta_max,
-        total_epochs=epochs,
-    )
-
     occ_weight = cfg.occ_weight
     svs_weight = cfg.svs_weight
+    occ_pos_weight = cfg.get("occ_pos_weight", 12.0)
+    svs_nonzero_weight = cfg.get("svs_nonzero_weight", 50.0)
 
     # ── tensorboard ───────────────────────────────────────────────────────
     writer = SummaryWriter(os.path.join(run_dir, "tensorboard"))
 
-    # ── initial visualization ─────────────────────────────────────────────
     vis_dir_train = os.path.join(run_dir, "visualizations_train")
     visualize_3d(model, val_data, device, epoch=0, save_dir=vis_dir_train)
 
     best_val_recon = float("inf")
-    use_free_bits = (cfg.beta_max <= 1)
+    ckpt_path = None
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # ── training loop ─────────────────────────────────────────────────────
     for epoch in range(1, epochs + 1):
-        beta = float(beta_schedule[epoch - 1])
 
         # ── train ─────────────────────────────────────────────────────────
         model.train()
-        t_loss = t_recon = t_occ = t_svs = t_kl = 0.0
+        t_loss = t_occ = t_svs = 0.0
 
         for batch in train_loader:
             batch = batch.to(device)  # (B, 2, 8, 16, 16)
             optimizer.zero_grad()
-            recon, mean, logvar, _ = model(batch)
-            loss, recon_l, occ_l, svs_l, kl_l = vae3d_loss(
-                recon, batch, mean, logvar, beta,
-                occ_weight=occ_weight, svs_weight=svs_weight,
-                use_free_bits=use_free_bits,
+            recon, *_ = model(batch)
+            loss, occ_l, svs_l = ae_loss(
+                recon, batch, occ_weight, svs_weight,
+                occ_pos_weight, svs_nonzero_weight,
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             t_loss += loss.item()
-            t_recon += recon_l.item()
             t_occ += occ_l.item()
             t_svs += svs_l.item()
-            t_kl += kl_l.item()
 
         n_train = len(train_loader)
         t_loss /= n_train
-        t_recon /= n_train
         t_occ /= n_train
         t_svs /= n_train
-        t_kl /= n_train
 
         # ── validate ──────────────────────────────────────────────────────
         model.eval()
-        v_loss = v_recon = v_occ = v_svs = v_kl = 0.0
+        v_loss = v_occ = v_svs = 0.0
+        v_iou = v_f1 = v_svs_nz = 0.0
 
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(device)
-                recon, mean, logvar, _ = model(batch)
-                loss, recon_l, occ_l, svs_l, kl_l = vae3d_loss(
-                    recon, batch, mean, logvar, beta,
-                    occ_weight=occ_weight, svs_weight=svs_weight,
-                    use_free_bits=use_free_bits,
+                recon, *_ = model(batch)
+                loss, occ_l, svs_l = ae_loss(
+                    recon, batch, occ_weight, svs_weight,
+                    occ_pos_weight, svs_nonzero_weight,
                 )
+                m = recon_metrics(recon, batch)
                 v_loss += loss.item()
-                v_recon += recon_l.item()
                 v_occ += occ_l.item()
                 v_svs += svs_l.item()
-                v_kl += kl_l.item()
+                v_iou += m["occ_iou"]
+                v_f1 += m["occ_f1"]
+                v_svs_nz += m["svs_mse_nonzero"]
 
         n_val = len(val_loader)
         v_loss /= n_val
-        v_recon /= n_val
         v_occ /= n_val
         v_svs /= n_val
-        v_kl /= n_val
+        v_iou /= n_val
+        v_f1 /= n_val
+        v_svs_nz /= n_val
 
         scheduler.step(v_loss)
 
         print(f"Epoch {epoch:3d}/{epochs} | "
-              f"train={t_loss:.4f} (occ={t_occ:.4f} svs={t_svs:.4f} kl={t_kl:.4f}) | "
-              f"val={v_loss:.4f} | beta={beta:.3f}")
+              f"train={t_loss:.4f} (occ={t_occ:.4f} svs={t_svs:.4f}) | "
+              f"val={v_loss:.4f} | occ_IoU={v_iou:.3f} F1={v_f1:.3f}")
 
         # ── tensorboard ───────────────────────────────────────────────────
         writer.add_scalars("loss", {"train": t_loss, "val": v_loss}, epoch)
-        writer.add_scalars("recon_loss", {"train": t_recon, "val": v_recon}, epoch)
         writer.add_scalars("occ_loss", {"train": t_occ, "val": v_occ}, epoch)
         writer.add_scalars("svs_loss", {"train": t_svs, "val": v_svs}, epoch)
-        writer.add_scalars("kl_loss", {"train": t_kl, "val": v_kl}, epoch)
-        writer.add_scalar("beta", beta, epoch)
+        writer.add_scalar("val/occ_iou", v_iou, epoch)
+        writer.add_scalar("val/occ_f1", v_f1, epoch)
+        writer.add_scalar("val/svs_mse_nonzero", v_svs_nz, epoch)
 
         # ── wandb ─────────────────────────────────────────────────────────
         wandb.log({
             "epoch": epoch,
-            "beta": beta,
             "train/loss": t_loss,
-            "train/recon_loss": t_recon,
             "train/occ_loss": t_occ,
             "train/svs_loss": t_svs,
-            "train/kl_loss": t_kl,
             "val/loss": v_loss,
-            "val/recon_loss": v_recon,
             "val/occ_loss": v_occ,
             "val/svs_loss": v_svs,
-            "val/kl_loss": v_kl,
+            "val/occ_iou": v_iou,
+            "val/occ_f1": v_f1,
+            "val/svs_mse_nonzero": v_svs_nz,
         })
 
         # ── visualization ─────────────────────────────────────────────────
         if epoch % 10 == 0 or epoch == epochs:
             visualize_3d(model, val_data, device, epoch, save_dir=vis_dir_train)
 
-        # ── checkpoint ────────────────────────────────────────────────────
-        if v_recon < best_val_recon:
-            best_val_recon = v_recon
+        # ── checkpoint (best val reconstruction) ──────────────────────────
+        if v_loss < best_val_recon:
+            best_val_recon = v_loss
             ckpt_dir = os.path.join(run_dir, "checkpoints")
             os.makedirs(ckpt_dir, exist_ok=True)
-            ckpt_path = os.path.join(ckpt_dir, f"vae3d_best_{timestamp}.pt")
+            ckpt_path = os.path.join(ckpt_dir, f"ae3d_best_{timestamp}.pt")
             torch.save(model.state_dict(), ckpt_path)
-            print(f"  Saved best model (val_recon={v_recon:.4f}) -> {ckpt_path}")
+            print(f"  Saved best model (val_loss={v_loss:.4f}) -> {ckpt_path}")
             wandb.run.summary["best_val_recon"] = best_val_recon
             wandb.run.summary["best_checkpoint"] = ckpt_path
 
@@ -414,18 +434,28 @@ def main():
     print("Latency metrics:")
     for k, v in latency_metrics.items():
         print(f"  {k}: {v:.3f} ms")
-
     wandb.log(latency_metrics)
     for k, v in latency_metrics.items():
         wandb.run.summary[k] = v
 
-    # ── final visualization ───────────────────────────────────────────────
-    if best_val_recon < float("inf"):
+    # ── TEST on frozen split (load best checkpoint, evaluate once) ─────────
+    if ckpt_path is not None:
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
     model.eval()
+
+    test_metrics = run_test(model, test_loader, device, occ_weight, svs_weight)
+    print("Test metrics:")
+    for k, v in test_metrics.items():
+        print(f"  {k}: {v:.4f}")
+    wandb.log(test_metrics)
+    for k, v in test_metrics.items():
+        wandb.run.summary[k] = v
+
+    # ── final visualization ───────────────────────────────────────────────
     vis_dir_final = os.path.join(run_dir, "visualizations_final")
     for i in range(5):
-        visualize_3d(model, val_data, device, epoch=f"final_{i}", save_dir=vis_dir_final)
+        visualize_3d(model, test_loader.dataset, device,
+                     epoch=f"final_{i}", save_dir=vis_dir_final)
 
     writer.flush()
     writer.close()
