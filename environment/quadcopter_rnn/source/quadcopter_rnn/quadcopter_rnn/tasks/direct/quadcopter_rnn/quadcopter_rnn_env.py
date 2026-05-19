@@ -227,28 +227,33 @@ class QuadcopterRnnEnv(DirectRLEnv):
             env_ids = torch.arange(self.num_envs, device=self.device)
 
         pos_w = self._robot.data.root_pos_w[env_ids]  # (E, 3)
-        env_origins = self.scene.env_origins[env_ids]                                                                        
-        #local_pos = pos_w - env_origins 
+        env_origins = self.scene.env_origins[env_ids]
+        local_pos = pos_w.clone()
+        local_pos[:, :2] -= env_origins[:, :2]
 
-        iz = ((pos_w[:, 2] - self.occ_origin[2]) / self.occ_grid_size).long()
-        iy = ((pos_w[:, 1] - self.occ_origin[1]) / self.occ_grid_size).long()
-        ix = ((pos_w[:, 0] - self.occ_origin[0]) / self.occ_grid_size).long()
+        iz = ((local_pos[:, 2] - self.occ_origin[2]) / self.occ_grid_size).long()
+        iy = ((local_pos[:, 1] - self.occ_origin[1]) / self.occ_grid_size).long()
+        ix = ((local_pos[:, 0] - self.occ_origin[0]) / self.occ_grid_size).long()
 
         NZ, NY, NX = self.occ_map_dims
         valid = (iz >= 0) & (iz < NZ) & (iy >= 0) & (iy < NY) & (ix >= 0) & (ix < NX)
 
-        if valid.any():                                                                                                                                                      
+        if valid.any():
             ve  = env_ids[valid]
             self.global_visit_counts[ve, iz[valid], iy[valid], ix[valid]] += 1.0
 
 
+
     # ── SECTION 2: Build local SVS map ────────────────────────────────────────
     def _build_local_svs_map(self, env_id: int) -> torch.Tensor:
-      pos_w = self._robot.data.root_pos_w[env_id]                                                                                    
-      stride = self.local_stride                                                                                                     
-      cz = int((pos_w[2] - self.occ_origin[2]) / self.occ_grid_size)                                                                 
-      cy = int((pos_w[1] - self.occ_origin[1]) / self.occ_grid_size)                                                                 
-      cx = int((pos_w[0] - self.occ_origin[0]) / self.occ_grid_size)                                                                 
+      pos_w = self._robot.data.root_pos_w[env_id]
+      local_pos = pos_w.clone()
+      local_pos[:2] -= self._terrain.env_origins[env_id, :2]
+      stride = self.local_stride
+      cz = int((local_pos[2] - self.occ_origin[2]) / self.occ_grid_size)
+      cy = int((local_pos[1] - self.occ_origin[1]) / self.occ_grid_size)
+      cx = int((local_pos[0] - self.occ_origin[0]) / self.occ_grid_size)
+                                                                 
                                                                                                                                      
       NZ, NY, NX = self.occ_map_dims                                                                                                 
       ghz, ghy, ghx = self.local_hz * stride, self.local_hy * stride, self.local_hx * stride                                         
@@ -272,18 +277,22 @@ class QuadcopterRnnEnv(DirectRLEnv):
       svs = torch.zeros_like(coarse)                                                                                                 
       if Nt > 0:                                                                                                                     
         p = coarse / Nt
-        svs = torch.where(p > 0, -p * torch.log(p), svs)                                                                           
-        local_occ = self._build_local_occ_map(env_id)                                                
+        svs = torch.where(p > 0, -p * torch.log(p), svs)
+        local_occ = self._build_local_occ_map(env_id)
         svs[local_occ > 0.5] = 0.0
         return svs
+      return torch.zeros_like(coarse)
 
     # ── SECTION 3: Sample local occupancy map from global ─────────────────────
     def _build_local_occ_map(self, env_id: int) -> torch.Tensor:
-      pos_w = self._robot.data.root_pos_w[env_id]                                                                                    
+      pos_w = self._robot.data.root_pos_w[env_id]
+      local_pos = pos_w.clone()
+      local_pos[:2] -= self._terrain.env_origins[env_id, :2]
       stride = self.local_stride
-      cz = int((pos_w[2] - self.occ_origin[2]) / self.occ_grid_size)                                                                 
-      cy = int((pos_w[1] - self.occ_origin[1]) / self.occ_grid_size)                                                                 
-      cx = int((pos_w[0] - self.occ_origin[0]) / self.occ_grid_size)
+      cz = int((local_pos[2] - self.occ_origin[2]) / self.occ_grid_size)
+      cy = int((local_pos[1] - self.occ_origin[1]) / self.occ_grid_size)
+      cx = int((local_pos[0] - self.occ_origin[0]) / self.occ_grid_size)
+
                                                                                                                                      
       NZ, NY, NX = self.occ_map_dims
       ghz, ghy, ghx = self.local_hz * stride, self.local_hy * stride, self.local_hx * stride                                         
@@ -530,7 +539,7 @@ class QuadcopterRnnEnv(DirectRLEnv):
         # self._desired_pos_w[env_ids, 0] = torch.zeros_like(self._desired_pos_w[env_ids, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
         # #self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(self.y_min + 1.0, self.y_max - 1.0)
         # self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(0.0, self.y_max - 1.0)
-        # self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
+        self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         # self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(self.z_min + 1.0, self.z_max - 1.0)
 
         joint_pos = self._robot.data.default_joint_pos[env_ids]

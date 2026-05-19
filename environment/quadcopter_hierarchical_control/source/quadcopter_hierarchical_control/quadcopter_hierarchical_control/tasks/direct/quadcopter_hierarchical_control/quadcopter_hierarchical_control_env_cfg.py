@@ -99,7 +99,7 @@ class QuadcopterHierarchicalControlEnvCfg(DirectRLEnvCfg):
     moment_scale = 0.01
 
 
-    # leafy-sweep-41 -> /home/studenti/dvernice/Marl_IsaacLab/environment/quadcopter_hierarchical_control/projects/quadcopter_hierarchical_control/logs/skrl/quadcopter_hierarchical_control_direct/2026-04-27_02-20-00_Manual_PPO/26-04-27_02-20-04-175314_PPO/checkpoints/best_agent.pt
+    # /home/studenti/dvernice/Marl_IsaacLab/environment/quadcopter_hierarchical_control/runs/manual_run/cosmic-smoke-232/26-05-18_14-18-46-704539_PPO/checkpoints/best_agent.pt
     # reward scales1
     lin_vel_reward_scale = 0.1
     ang_vel_reward_scale = 0.1

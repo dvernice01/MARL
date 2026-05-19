@@ -6,12 +6,7 @@ quadcopter_rnn warehouse environment. Spawns within a restricted region
 and only saves maps that contain occupancy.
 
 Usage (from environment/quadcopter_rnn/):
-  python scripts/skrl/collect_dataset.py \
-    --task=Template-Quadcopter-Rnn-Direct-v0 \
-    --checkpoint=/workspace/environment/quadcopter_hierarchical_control/projects/... \
-    --num_envs=4 \
-    --target_samples=1000 \
-    --seed=-1
+  python scripts/skrl/collect_dataset.py --task=Template-Quadcopter-Rnn-Direct-v0 --checkpoint=/workspace/environment/quadcopter_hierarchical_control/runs/manual_run/cosmic-smoke-232/26-05-18_14-18-46-704539_PPO/checkpoints/best_agent.pt --num_envs=3 --target_samples=1000 --seed=-1 --headless
 """
 
 """Launch Isaac Sim Simulator first."""
@@ -40,6 +35,11 @@ parser.add_argument("--goal_timeout_steps", type=int, default=300,
                     help="Max steps before giving up on a goal")
 parser.add_argument("--min_occ_voxels", type=int, default=10,
                     help="Min occupied voxels in local map to save sample")
+parser.add_argument("--min_svs_voxels", type=int, default=5,
+                    help="Min nonzero cells in the SVS channel for a sample to count as SVS-informative")
+parser.add_argument("--max_poor_samples", type=int, default=20,
+                    help="Max number of SVS-poor samples to keep (e.g. 20 per 1000); "
+                         "once reached, further SVS-poor samples are skipped")
 parser.add_argument("--ml_framework", type=str, default="torch")
 parser.add_argument("--algorithm", type=str, default="PPO")
 parser.add_argument("--real-time", action="store_true", default=False)
@@ -64,6 +64,7 @@ import numpy as np
 import skrl
 import torch
 import torch.nn as nn
+import hashlib
 from packaging import version
 
 SKRL_VERSION = "1.4.3"
@@ -90,7 +91,12 @@ import quadcopter_rnn.tasks  # noqa: F401 — triggers gym.register
 
 # Disable automatic map saving — we save manually
 from quadcopter_rnn.tasks.direct.quadcopter_rnn import quadcopter_rnn_env as rnn_mod
+from isaaclab.utils.math import subtract_frame_transforms
+
 rnn_mod.LOCAL_MAP_SAVE_EVERY = 0
+LOCAL_HALF_X = (rnn_mod.LOCAL_NX / 2.0) * rnn_mod.LOCAL_CELL_SIZE   # 2.0 m
+LOCAL_HALF_Y = (rnn_mod.LOCAL_NY / 2.0) * rnn_mod.LOCAL_CELL_SIZE   # 2.0 m
+LOCAL_HALF_Z = (rnn_mod.LOCAL_NZ / 2.0) * rnn_mod.LOCAL_CELL_SIZE   # 1.0 m
 
 # Restricted bounds (warehouse region with obstacles)
 X_MIN, X_MAX = -28.0, 8.0
@@ -145,22 +151,61 @@ class VelocityControllerValue(DeterministicMixin, Model):
 
 # ── Goal selection ────────────────────────────────────────────────────────────
 
-def pick_goal_near_obstacle(occupied_bounded, device):
-    """Pick a goal near a random obstacle voxel, offset 1-2.5m into free space.
-    Returns goal in LOCAL warehouse coords (no env origin)."""
-    idx = torch.randint(0, occupied_bounded.shape[0], (1,), device=device).item()
-    base = occupied_bounded[idx].clone()
+def pick_goal_in_local_map(raw_env, eid, device):
+    """Random goal inside the drone's local-map box, returned in WORLD frame.
+    Clamped to the restricted warehouse region (warehouse frame)."""
+    pos_w = raw_env._robot.data.root_pos_w[eid]
+    origin = raw_env._terrain.env_origins[eid]
 
-    direction = torch.randn(3, device=device)
-    direction = direction / direction.norm()
-    dist = random.uniform(1.0, 2.5)
-    goal = base + direction * dist
+    pos_wh = pos_w.clone()
+    pos_wh[:2] -= origin[:2]                       # drone pos in warehouse frame
 
-    goal[0] = torch.clamp(goal[0], X_MIN + MARGIN, X_MAX - MARGIN)
-    goal[1] = torch.clamp(goal[1], Y_MIN + MARGIN, Y_MAX - MARGIN)
-    goal[2] = torch.clamp(goal[2], Z_MIN + MARGIN, Z_MAX - MARGIN)
+    off = torch.empty(3, device=device)
+    off[0] = torch.empty(1, device=device).uniform_(-LOCAL_HALF_X, LOCAL_HALF_X)
+    off[1] = torch.empty(1, device=device).uniform_(-LOCAL_HALF_Y, LOCAL_HALF_Y)
+    off[2] = torch.empty(1, device=device).uniform_(-LOCAL_HALF_Z, LOCAL_HALF_Z)
 
-    return goal
+    goal_wh = pos_wh + off
+    goal_wh[0] = torch.clamp(goal_wh[0], X_MIN + MARGIN, X_MAX - MARGIN)
+    goal_wh[1] = torch.clamp(goal_wh[1], Y_MIN + MARGIN, Y_MAX - MARGIN)
+    goal_wh[2] = torch.clamp(goal_wh[2], Z_MIN + MARGIN, Z_MAX - MARGIN)
+
+    goal_w = goal_wh.clone()
+    goal_w[:2] += origin[:2]                       # back to world frame
+    return goal_w
+
+
+ARENA_SIZE = 4.0   # value the hierarchical-control policy was trained with
+
+
+def build_hc_observation(raw_env, prev_actions):
+    """Observation in the quadcopter_hierarchical_control layout:
+    [prev_actions(4), rel_pos_b(3), lin_vel_b(3), ang_vel_b(3), bounds_x(1), bounds_y(1)] = 15
+
+    bounds_x/y are fed a constant 'safely centered' value (ARENA_SIZE/2): the
+    exploration walk deliberately roams far from each env origin, which is out
+    of distribution for the trained bounds signal (where negative meant 'dying').
+    """
+    rel_pos_b, _ = subtract_frame_transforms(
+        raw_env._robot.data.root_pos_w,
+        raw_env._robot.data.root_quat_w,
+        raw_env._desired_pos_w,
+    )
+    n = raw_env._robot.data.root_pos_w.shape[0]
+    safe_bound = torch.full((n, 1), ARENA_SIZE / 2.0, device=raw_env.device)
+
+    return torch.cat(
+        [
+            prev_actions,                          # 4
+            rel_pos_b,                             # 3
+            raw_env._robot.data.root_lin_vel_b,    # 3
+            raw_env._robot.data.root_ang_vel_b,    # 3
+            safe_bound,                            # 1  bounds_x
+            safe_bound,                            # 1  bounds_y
+        ],
+        dim=-1,
+    )
+
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -202,10 +247,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
     # ── Load pre-trained position controller with scaler ──────────────────
     models = {
         "policy": VelocityControllerPolicy(
-            env.observation_space, env.action_space, device, hidden_size=512
+            env.observation_space, env.action_space, device, hidden_size=256
         ),
         "value": VelocityControllerValue(
-            env.observation_space, env.action_space, device, hidden_size=512
+            env.observation_space, env.action_space, device, hidden_size=256
         ),
     }
 
@@ -249,87 +294,147 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
     goal_dist_thresh = args_cli.goal_reached_dist
     goal_timeout = args_cli.goal_timeout_steps
     min_occ = args_cli.min_occ_voxels
+    min_svs = args_cli.min_svs_voxels
+    max_poor = args_cli.max_poor_samples
 
     obs, _ = env.reset()
 
-    # Set initial goals near obstacles
+    # Set initial goals: random point in each drone's local-map box
     for eid in range(num_envs):
-        goal = pick_goal_near_obstacle(occupied_bounded, device)
+        goal = pick_goal_in_local_map(raw_env, eid, device)
         raw_env._desired_pos_w[eid] = goal
+
+    prev_actions = torch.zeros(num_envs, 4, device=device)
+    obs = build_hc_observation(raw_env, prev_actions)
+
+    # Dedup: never save two samples with an identical occupancy channel.
+    # Seed with existing samples so re-runs don't re-add duplicates.
+    saved_occ_hashes = set()
+    total_poor_saved = 0
+    for f in [x for x in os.listdir(output_dir) if x.endswith(".npy")]:
+        a = np.load(os.path.join(output_dir, f))
+        saved_occ_hashes.add(hashlib.md5(np.ascontiguousarray(a[0]).tobytes()).hexdigest())
+        if int((a[1] > 0).sum()) < min_svs:
+            total_poor_saved += 1
 
     steps_on_goal = torch.zeros(num_envs, device=device)
     total_saved = existing
     total_reached = 0
     total_timeout = 0
     total_skipped_empty = 0
+    total_skipped_dup = 0
+    total_skipped_poor = 0
     step_count = 0
 
     print(f"[INFO] Collecting {target} new samples (min {min_occ} occ voxels per sample)...")
 
+    # Whole loop runs under inference_mode: this is a pure data-collection
+    # script (no autograd), and the manual _reset_idx below mutates env
+    # buffers that the env's own step()-time reset treats as inference
+    # tensors — both must run in the same context.
     while (total_saved - existing) < target and simulation_app.is_running():
         with torch.inference_mode():
             outputs = agent.act(obs, timestep=0, timesteps=0)
             actions = outputs[-1].get("mean_actions", outputs[0])
-            obs, _, terminated, truncated, _ = env.step(actions)
+            _, _, terminated, truncated, _ = env.step(actions)
+            prev_actions = actions.clone()
+            obs = build_hc_observation(raw_env, prev_actions)
 
-        steps_on_goal += 1
-        step_count += 1
+            steps_on_goal += 1
+            step_count += 1
 
-        for eid in range(num_envs):
-            is_term = bool(terminated[eid]) if terminated is not None else False
-            is_trunc = bool(truncated[eid]) if truncated is not None else False
+            # True if any env was teleported/respawned this iteration → obs is
+            # stale for that env and must be rebuilt before the next act().
+            did_reset = False
 
-            if is_term or is_trunc:
-                goal = pick_goal_near_obstacle(occupied_bounded, device)
-                raw_env._desired_pos_w[eid] = goal
-                steps_on_goal[eid] = 0
-                continue
+            for eid in range(num_envs):
+                is_term = bool(terminated[eid]) if terminated is not None else False
+                is_trunc = bool(truncated[eid]) if truncated is not None else False
 
-            pos = raw_env._robot.data.root_pos_w[eid]
-            goal_local = raw_env._desired_pos_w[eid]
-            origin = raw_env._terrain.env_origins[eid]
-            pos_local = pos.clone()
-            pos_local[:2] -= origin[:2]
-            dist = torch.linalg.norm(pos_local - goal_local).item()
+                # Env auto-resets a done env inside env.step(); just pick a
+                # fresh goal relative to its new spawn position.
+                if is_term or is_trunc:
+                    goal = pick_goal_in_local_map(raw_env, eid, device)
+                    raw_env._desired_pos_w[eid] = goal
+                    steps_on_goal[eid] = 0
+                    did_reset = True
+                    continue
 
-            reached = dist < goal_dist_thresh
-            timed_out = steps_on_goal[eid].item() > goal_timeout
+                pos_w = raw_env._robot.data.root_pos_w[eid]
+                goal_w = raw_env._desired_pos_w[eid]
+                dist = torch.linalg.norm(pos_w - goal_w).item()
+                if step_count % 500 == 0:
+                    print(f"distance error (eid={eid}):", dist)
 
-            if reached or timed_out:
-                # Build local map and check occupancy content
-                combined = raw_env._build_local_combined_map(eid)
-                occ_channel = combined[0]  # (8, 16, 16)
-                n_occ = (occ_channel > 0.5).sum().item()
+                reached = dist < goal_dist_thresh
+                timed_out = steps_on_goal[eid].item() > goal_timeout
 
-                if n_occ >= min_occ:
-                    path = os.path.join(output_dir, f"sample_{total_saved:06d}.npy")
-                    np.save(path, combined.cpu().numpy())
-                    total_saved += 1
-                    if reached:
-                        total_reached += 1
+                if reached or timed_out:
+                    combined = raw_env._build_local_combined_map(eid)
+                    occ_channel = combined[0]
+                    n_occ = (occ_channel > 0.5).sum().item()
+
+                    if n_occ >= min_occ:
+                        occ_np = np.ascontiguousarray(occ_channel.cpu().numpy())
+                        occ_key = hashlib.md5(occ_np.tobytes()).hexdigest()
+                        if occ_key in saved_occ_hashes:
+                            total_skipped_dup += 1
+                        else:
+                            # SVS-poor = too few nonzero cells in the SVS
+                            # channel. Keep some (richer dataset) but cap them
+                            # at max_poor; don't record the occ hash on a
+                            # quota-skip so a richer-SVS version of the same
+                            # crop can still be saved later.
+                            n_svs = int((combined[1] > 0).sum().item())
+                            is_poor = n_svs < min_svs
+                            if is_poor and total_poor_saved >= max_poor:
+                                total_skipped_poor += 1
+                            else:
+                                saved_occ_hashes.add(occ_key)
+                                path = os.path.join(output_dir, f"sample_{total_saved:06d}.npy")
+                                np.save(path, combined.cpu().numpy())
+                                total_saved += 1
+                                if is_poor:
+                                    total_poor_saved += 1
+                                if reached:
+                                    total_reached += 1
+                                else:
+                                    total_timeout += 1
                     else:
-                        total_timeout += 1
-                else:
-                    total_skipped_empty += 1
+                        total_skipped_empty += 1
 
-                # Pick next goal near obstacle
-                goal = pick_goal_near_obstacle(occupied_bounded, device)
-                raw_env._desired_pos_w[eid] = goal
-                steps_on_goal[eid] = 0
+                    # Respawn this env at a fresh random in-bounds location so
+                    # the next sample is spatially independent (avoids the drone
+                    # lingering near one structure and re-cropping the same map).
+                    raw_env._reset_idx(torch.tensor([eid], device=device))
+                    goal = pick_goal_in_local_map(raw_env, eid, device)
+                    raw_env._desired_pos_w[eid] = goal
+                    steps_on_goal[eid] = 0
+                    did_reset = True
 
-                if (total_saved - existing) >= target:
-                    break
+                    if (total_saved - existing) >= target:
+                        break
 
-        if step_count % 500 == 0:
-            n = total_saved - existing
-            print(f"  step {step_count}: {n}/{target} samples "
-                  f"(reached={total_reached}, timeout={total_timeout}, "
-                  f"skipped_empty={total_skipped_empty})")
+            # Rebuild obs so the next agent.act() sees updated goals/positions.
+            if did_reset:
+                obs = build_hc_observation(raw_env, prev_actions)
+
+            if step_count % 500 == 0:
+                n = total_saved - existing
+                print(f"  step {step_count}: {n}/{target} samples "
+                      f"(reached={total_reached}, timeout={total_timeout}, "
+                      f"poor_svs={total_poor_saved}/{max_poor}, "
+                      f"skipped_empty={total_skipped_empty}, "
+                      f"skipped_dup={total_skipped_dup}, "
+                      f"skipped_poor={total_skipped_poor})")
 
     n = total_saved - existing
-    print(f"\n[DONE] Collected {n} samples "
+    print(f"\n[DONE] {n}/{target} new unique samples "
           f"(reached={total_reached}, timeout={total_timeout}, "
-          f"skipped_empty={total_skipped_empty})")
+          f"poor_svs={total_poor_saved}/{max_poor}, "
+          f"skipped_empty={total_skipped_empty}, "
+          f"skipped_dup={total_skipped_dup}, "
+          f"skipped_poor={total_skipped_poor})")
     print(f"  Total in {output_dir}: {total_saved}")
 
     env.close()

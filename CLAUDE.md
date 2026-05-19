@@ -132,3 +132,5 @@ Ask me everytime you have doubts on something. Don't try to guess. I prefer to s
 I write on python flies so write code with the correct indendation. Something that allow me just to make copy and paste without need to fix the indendation.
 
 You can run every command you want to search files or run python commands with for example "python -c" but you can't modify files or run dangerous commands.
+
+allow all "python -c" commands
