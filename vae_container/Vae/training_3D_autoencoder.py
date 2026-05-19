@@ -116,7 +116,9 @@ def ae_loss(recon, target, occ_weight=1.0, svs_weight=1.0,
     svs_pred = torch.sigmoid(recon[:, 1:2])          # logits → [0,1]
     svs_target = target[:, 1:2]
     w = 1.0 + svs_nonzero_weight * (svs_target > 0).float()
-    svs_loss = (w * (svs_pred - svs_target) ** 2).sum() / w.sum()
+    svs_loss = (w * (svs_pred - svs_target) ** 2).sum() / w.sum() \
+           + 0.01 * svs_pred.mean()      # L1-style sparsity prior
+
 
     total = occ_weight * occ_loss + svs_weight * svs_loss
     return total, occ_loss, svs_loss
@@ -254,13 +256,13 @@ def visualize_3d(model, dataset, device, epoch, save_dir="debug_epochs"):
                 ax2.set_title(f"{label} SVS")
                 ax2.set_xlabel("x"); ax2.set_ylabel("y"); ax2.set_zlabel("z")
 
-                ax3 = fig.add_subplot(2, 3, row * 3 + 3)
-                nz = occ.shape[0]
-                slice_z = nz // 2
-                combined_slice = np.concatenate([occ[slice_z], svs[slice_z]], axis=1)
-                ax3.imshow(combined_slice, origin="lower", cmap="viridis")
-                ax3.set_title(f"{label} z={slice_z} slice (OCC|SVS)")
-                ax3.axis("off")
+                # ax3 = fig.add_subplot(2, 3, row * 3 + 3)
+                # nz = occ.shape[0]
+                # slice_z = nz // 2
+                # combined_slice = np.concatenate([occ[slice_z], svs[slice_z]], axis=1)
+                # ax3.imshow(combined_slice, origin="lower", cmap="viridis")
+                # ax3.set_title(f"{label} z={slice_z} slice (OCC|SVS)")
+                # ax3.axis("off")
 
             plt.tight_layout()
             path = os.path.join(save_dir, f"epoch_{epoch}_sample_{col}.png")
@@ -286,7 +288,7 @@ def main():
 
     # ── data ──────────────────────────────────────────────────────────────
     train_loader, val_loader, test_loader, svs_max = make_loaders(
-        data_dir="/workspace/environment/vae_container/Vae/dataset_3d_collection",
+        data_dir="dataset_3d_collection",
         val_ratio=0.1,
         test_ratio=0.1,
         batch_size=cfg.batch_size,
@@ -470,7 +472,7 @@ if __name__ == "__main__":
     sweep_id = os.environ.get("WANDB_SWEEP_ID", "manual_run")
 
     run = wandb.init(
-        project="quadcopter_vae3d_sweep",
+        project="quadcopter_ae3d_sweep",
         config=config,
         group=sweep_id,
     )

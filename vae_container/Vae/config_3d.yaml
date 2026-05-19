@@ -1,0 +1,33 @@
+program: training_3D_autoencoder.py
+method: random
+name: vae3d_sweep
+metric:
+  goal: minimize
+  name: val/loss
+parameters:
+  batch_size:
+    value: 32
+  lr:
+    value: 0.0001
+  epochs:
+    value: 100
+  latent_dim:
+    value: 128
+  num_conv_layers:
+    value: 6
+  num_deconv_layers:
+    value: 6
+  use_residual:
+    value: true
+  residual_every:
+    value: 2
+  use_skip:
+    value: true
+  occ_weight:
+    value: 1.0
+  svs_weight:
+    value: 1.0
+  occ_pos_weight:
+    value: 2.0
+  svs_nonzero_weight:
+    value: 7.5
