@@ -1,33 +1,25 @@
 program: training_3D_autoencoder.py
-method: random
-name: vae3d_sweep
+method: bayes                          # active search; explores informative configs
+name: 3d_ae_training
 metric:
   goal: minimize
-  name: val/loss
+  name: val/svs_mse_nonzero            # optimize for YOUR priority (SVS)
 parameters:
-  batch_size:
-    value: 32
-  lr:
-    value: 0.0001
-  epochs:
-    value: 100
-  latent_dim:
-    value: 128
-  num_conv_layers:
-    value: 6
-  num_deconv_layers:
-    value: 6
-  use_residual:
-    value: true
-  residual_every:
-    value: 2
-  use_skip:
-    value: true
-  occ_weight:
-    value: 1.0
-  svs_weight:
-    value: 1.0
-  occ_pos_weight:
-    value: 2.0
-  svs_nonzero_weight:
-    value: 7.5
+  # ── fixed ────────────────────────────────────────────────────
+  batch_size:         {value: 32}
+  epochs:             {value: 100}
+  use_residual:       {value: true}
+  residual_every:     {value: 2}
+  use_skip:           {value: true}
+  occ_weight:         {value: 1.0}
+  # ── architecture (capacity confound) ─────────────────────────
+  latent_dim:         {values: [64, 128, 192, 256]}
+  num_conv_layers:    {values: [4, 5, 6]}
+  num_deconv_layers:  {values: [4, 5, 6]}
+  # ── optim ────────────────────────────────────────────────────
+  lr:                 {values: [0.0001, 0.0003]}
+  weight_decay:       {values: [0.0, 0.0001, 0.001]}
+  # ── loss balance — the place SVS can actually be pushed ───
+  svs_weight:         {values: [0.3, 1.0, 3.0]}
+  occ_pos_weight:     {values: [6.0, 12.0]}
+  svs_nonzero_weight: {values: [5.0, 20.0, 50.0]}

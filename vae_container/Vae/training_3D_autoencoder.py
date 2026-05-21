@@ -34,16 +34,22 @@ g.manual_seed(SEED)
 # ── DATASET ──────────────────────────────────────────────────────────────────
 
 class LocalMap3DDataset(Dataset):
-    """Loads (2, 8, 16, 16) .npy files: channel 0 = occupancy, channel 1 = SVS."""
+    """Loads (2, 8, 16, 16) .npy files: channel 0 = occupancy, channel 1 = SVS.
 
-    def __init__(self, file_list, svs_max=None):
+    If augment=True, applies random axis-aligned XY flips identically to both
+    channels (Z is gravity-asymmetric — not flipped). Effective ×4 train set,
+    a strong regularizer for the small dataset."""
+
+    def __init__(self, file_list, svs_max=None, augment=False):
         self.file_list = file_list
         self.svs_max = svs_max
+        self.augment = augment
 
     def __len__(self):
         return len(self.file_list)
 
     def __getitem__(self, idx):
+
         data = np.load(self.file_list[idx]).astype(np.float32)  # (2, 8, 16, 16)
 
         occ = np.clip(data[0], 0.0, 1.0)
@@ -54,7 +60,17 @@ class LocalMap3DDataset(Dataset):
         svs = np.clip(svs, 0.0, 1.0)
 
         combined = np.stack([occ, svs], axis=0)  # (2, 8, 16, 16)
+
+        if self.augment:
+            if random.random() < 0.5:
+                combined = combined[:, :, :, ::-1]   # flip X (last axis)
+            if random.random() < 0.5:
+                combined = combined[:, :, ::-1, :]   # flip Y
+            combined = np.ascontiguousarray(combined)
+
         return torch.from_numpy(combined).float()
+
+    
 
 
 def make_loaders(data_dir, val_ratio=0.1, test_ratio=0.1,
@@ -86,20 +102,24 @@ def make_loaders(data_dir, val_ratio=0.1, test_ratio=0.1,
     print(f"  SVS max (train only): {svs_max:.6f}")
     print(f"  Train: {n_train} | Val: {n_val} | Test: {n_test}")
 
-    def mk(files, shuffle):
+    def mk(files, shuffle, augment):
         return DataLoader(
-            LocalMap3DDataset(files, svs_max=svs_max),
+            LocalMap3DDataset(files, svs_max=svs_max, augment=augment),
             batch_size=batch_size, shuffle=shuffle,
             num_workers=num_workers, pin_memory=True, worker_init_fn=seed_worker,
         )
 
-    return mk(train_files, True), mk(val_files, False), mk(test_files, False), svs_max
+    # Augment only the train loader; val/test stay deterministic.
+    return (mk(train_files, True, augment=True),
+            mk(val_files,   False, augment=False),
+            mk(test_files,  False, augment=False),
+            svs_max)
 
 
 # ── LOSS (autoencoder, no KL) ────────────────────────────────────────────────
 
 def ae_loss(recon, target, occ_weight=1.0, svs_weight=1.0,
-            occ_pos_weight=12.0, svs_nonzero_weight=50.0):
+            occ_pos_weight=12.0, svs_nonzero_weight=5.0):
     """recon = raw decoder output (model built with with_logits=True → no final
     sigmoid). channel 0 = occupancy (binary), channel 1 = SVS ([0,1]).
 
@@ -117,7 +137,7 @@ def ae_loss(recon, target, occ_weight=1.0, svs_weight=1.0,
     svs_target = target[:, 1:2]
     w = 1.0 + svs_nonzero_weight * (svs_target > 0).float()
     svs_loss = (w * (svs_pred - svs_target) ** 2).sum() / w.sum() \
-           + 0.01 * svs_pred.mean()      # L1-style sparsity prior
+           + 0.05 * svs_pred.mean()
 
 
     total = occ_weight * occ_loss + svs_weight * svs_loss
@@ -311,7 +331,12 @@ def main():
         use_skip=cfg.use_skip,
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+    # AdamW (decoupled weight decay) — anti-overfitting on the small dataset.
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=cfg.lr,
+        weight_decay=cfg.get("weight_decay", 1e-4),
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=15
     )
