@@ -78,8 +78,6 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
         self.distance_to_bounds_x = torch.zeros(self.num_envs, device=self.device)
         self.distance_to_bounds_y = torch.zeros(self.num_envs, device=self.device)
         self.final_distance_to_goal_b = torch.zeros(self.num_envs, device=self.device)
-        # INIT PER CURRICULUM LEARNING
-        self.curriculum_level = 0
         self.arena_size = torch.ones(self.num_envs, device=self.device) * 4.0
 
         # Accumulatori per valutazione
@@ -291,7 +289,7 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
         #self._prev_actions[env_ids] = 0.0
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 2.0)
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
