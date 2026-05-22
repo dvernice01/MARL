@@ -70,8 +70,6 @@ class LocalMap3DDataset(Dataset):
 
         return torch.from_numpy(combined).float()
 
-    
-
 
 def make_loaders(data_dir, val_ratio=0.1, test_ratio=0.1,
                  batch_size=32, num_workers=2):
@@ -118,72 +116,111 @@ def make_loaders(data_dir, val_ratio=0.1, test_ratio=0.1,
 
 # ── LOSS (autoencoder, no KL) ────────────────────────────────────────────────
 
-def ae_loss(recon, target, occ_weight=1.0, svs_weight=1.0,
-            occ_pos_weight=12.0, svs_nonzero_weight=5.0):
-    """recon = raw decoder output (model built with with_logits=True → no final
-    sigmoid). channel 0 = occupancy (binary), channel 1 = SVS ([0,1]).
+"""pos_weight=12	               inflate positive-class BCE	            matches 92:8 OCC class imbalance
+BCE_with_logits on raw logits	   numerical stability	                    log(0) never computed;pairs with with_logits=True model
+sigmoid applied to SVS manually	   because we use MSE there	                MSE expects values in same space as target ([0,1])
+weighted-MSE with w = 1 or 6	   upweight rare nonzero-target voxels	    otherwise loss is dominated by 99% zeros
++ 0.05 * svs_pred.mean()	       sparsity prior	                        combat dense-smear failure mode
+occ_weight=1, svs_weight=0.3	   OCC-dominant total	                    SVS is harder/has ceiling — don't let it drag OCC down"""
 
-    The dataset is extremely imbalanced (~7% occupied, <1% SVS-nonzero), so a
-    plain BCE/MSE collapses to predicting zeros. Occupancy uses a stable,
-    pos-weighted BCE-with-logits; SVS uses an MSE that upweights the rare
-    nonzero voxels.
+
+def soft_dice_loss(pred, target, eps=1e-6):
+    """Differentiable Dice loss (= 1 − Dice), per-sample then batch-averaged.
+    pred, target in [0, 1], same shape. Every spurious voxel adds to Σp
+    without adding to the numerator, so this punishes the inflation halo
+    that per-voxel BCE/MSE tolerate."""
+    p = pred.flatten(1)                       # (B, n_voxels)
+    t = target.flatten(1)
+    inter = (p * t).sum(dim=1)
+    denom = p.sum(dim=1) + t.sum(dim=1)
+    dice = (2.0 * inter + eps) / (denom + eps)
+    return 1.0 - dice.mean()
+
+def ae_loss(recon, target, occ_weight=1.0, svs_weight=1.0,
+            occ_pos_weight=12.0, svs_nonzero_weight=5.0, dice_weight=0.0):
+    """recon = raw decoder logits (with_logits=True). ch0 = occupancy, ch1 = SVS.
+
+    Per-channel loss = (BCE or weighted-MSE)  +  dice_weight · soft-Dice.
+    BCE/MSE give stable per-voxel gradients; the Dice term optimizes set
+    overlap and punishes the low-magnitude inflation halo.
     """
+    # ── occupancy: pos-weighted BCE + Dice ────────────────────────────────
     occ_logits = recon[:, 0:1]
     occ_target = target[:, 0:1]
     pw = torch.tensor(occ_pos_weight, device=recon.device)
-    occ_loss = F.binary_cross_entropy_with_logits(occ_logits, occ_target, pos_weight=pw)
+    occ_bce = F.binary_cross_entropy_with_logits(occ_logits, occ_target, pos_weight=pw)
+    occ_dice = soft_dice_loss(torch.sigmoid(occ_logits), occ_target)
+    occ_loss = occ_bce + dice_weight * occ_dice
 
-    svs_pred = torch.sigmoid(recon[:, 1:2])          # logits → [0,1]
+    # ── SVS: weighted MSE (+ sparsity) + Dice on the visit SET ────────────
+    svs_pred = torch.sigmoid(recon[:, 1:2])
     svs_target = target[:, 1:2]
     w = 1.0 + svs_nonzero_weight * (svs_target > 0).float()
-    svs_loss = (w * (svs_pred - svs_target) ** 2).sum() / w.sum() \
-           + 0.05 * svs_pred.mean()
-
+    svs_mse = (w * (svs_pred - svs_target) ** 2).sum() / w.sum() \
+              + 0.05 * svs_pred.mean()
+    svs_dice = soft_dice_loss(svs_pred, (svs_target > 0).float())
+    svs_loss = svs_mse + dice_weight * svs_dice
 
     total = occ_weight * occ_loss + svs_weight * svs_loss
     return total, occ_loss, svs_loss
 
-
 @torch.no_grad()
-def recon_metrics(recon, target, occ_thresh=0.5):
-    """Threshold-based metrics — loss alone is misleading on imbalanced data
-    (an all-zeros model has near-zero loss but IoU≈0)."""
+def recon_metrics(recon, target, occ_thresh=0.5, svs_thresh=0.15):
+    # ── OCC (unchanged) ─────────────────────────────────────────
     occ_p = torch.sigmoid(recon[:, 0:1]) > occ_thresh
     occ_t = target[:, 0:1] > 0.5
-    inter = (occ_p & occ_t).sum().float()
-    union = (occ_p | occ_t).sum().float().clamp(min=1)
+    inter = (occ_p & occ_t).sum().float() # True positives — voxels predicted occupied and actually occupied
+    union = (occ_p | occ_t).sum().float().clamp(min=1) # total voxels predicted OR actually occupied (used in IoU denominator)
     tp = inter
-    fp = (occ_p & ~occ_t).sum().float()
-    fn = (~occ_p & occ_t).sum().float()
+    fp_o = (occ_p & ~occ_t).sum().float() # False positives — predicted occupied but actually empty
+    fn_o = (~occ_p & occ_t).sum().float() # False negatives — predicted empty but actually occupied
 
+    # ── SVS — threshold both, then IoU/F1 (penalises FP AND FN) ─
     svs_p = torch.sigmoid(recon[:, 1:2])
     svs_t = target[:, 1:2]
+    svs_p_bin = svs_p > svs_thresh  # perchè ci sono dei pesi     # "the model thinks this was visited"
+    svs_t_bin = svs_t > 0                 # "actually visited"
+    s_tp = (svs_p_bin & svs_t_bin).sum().float()
+    s_fp = (svs_p_bin & ~svs_t_bin).sum().float()
+    s_fn = (~svs_p_bin & svs_t_bin).sum().float()
+    s_union = (svs_p_bin | svs_t_bin).sum().float().clamp(min=1)
+
     m = svs_t > 0
-    svs_mse_nz = ((svs_p - svs_t) ** 2)[m].mean().item() if m.any() else 0.0
+    svs_mse_nz = ((svs_p - svs_t) ** 2)[m].mean().item() if m.any() else 0.0 # squared error averaged only over true-visit voxels
+    svs_mse_zero = (svs_p[~m] ** 2).mean().item() if (~m).any() else 0.0   # squared prediction averaged only over true-zero voxels 
 
     return {
         "occ_iou": (inter / union).item(),
-        "occ_f1": (2 * tp / (2 * tp + fp + fn).clamp(min=1)).item(),
+        "occ_f1":  (2*tp / (2*tp + fp_o + fn_o).clamp(min=1)).item(),
+        "svs_iou": (s_tp / s_union).item(), #The honest SVS quality metric. Penalizes both missing real visits and fake predicted visits in empty space
+        "svs_f1":  (2*s_tp / (2*s_tp + s_fp + s_fn).clamp(min=1)).item(),
         "svs_mse_nonzero": svs_mse_nz,
+        "svs_mse_zero":    svs_mse_zero,
     }
-
 
 # ── TEST (frozen split, evaluated once at the end) ───────────────────────────
 
 @torch.no_grad()
-def run_test(model, test_loader, device, occ_weight=1.0, svs_weight=1.0):
+def run_test(model, test_loader, device, occ_weight=1.0, svs_weight=1.0,
+             occ_pos_weight=12.0, svs_nonzero_weight=5.0, dice_weight=0.0):
     model.eval()
-    keys = ["loss", "occ", "svs", "occ_iou", "occ_f1", "svs_mse_nonzero"]
+    keys = ["loss", "occ", "svs",
+            "occ_iou", "occ_f1",
+            "svs_iou", "svs_f1",
+            "svs_mse_nonzero", "svs_mse_zero"]
     tot = {k: 0.0 for k in keys}
     for batch in test_loader:
         batch = batch.to(device)
         recon, *_ = model(batch)
-        loss, occ_l, svs_l = ae_loss(recon, batch, occ_weight, svs_weight)
+        loss, occ_l, svs_l = ae_loss(recon, batch, occ_weight, svs_weight,
+                                     occ_pos_weight, svs_nonzero_weight, dice_weight)
         m = recon_metrics(recon, batch)
         tot["loss"] += loss.item()
         tot["occ"] += occ_l.item()
         tot["svs"] += svs_l.item()
-        for k in ("occ_iou", "occ_f1", "svs_mse_nonzero"):
+        for k in ("occ_iou", "occ_f1",
+                  "svs_iou", "svs_f1",
+                  "svs_mse_nonzero", "svs_mse_zero"):
             tot[k] += m[k]
     nb = len(test_loader)
     return {f"test/{k}": v / nb for k, v in tot.items()}
@@ -346,6 +383,7 @@ def main():
     svs_weight = cfg.svs_weight
     occ_pos_weight = cfg.get("occ_pos_weight", 12.0)
     svs_nonzero_weight = cfg.get("svs_nonzero_weight", 50.0)
+    dice_weight = cfg.get("dice_weight", 0.0)
 
     # ── tensorboard ───────────────────────────────────────────────────────
     writer = SummaryWriter(os.path.join(run_dir, "tensorboard"))
@@ -370,8 +408,9 @@ def main():
             recon, *_ = model(batch)
             loss, occ_l, svs_l = ae_loss(
                 recon, batch, occ_weight, svs_weight,
-                occ_pos_weight, svs_nonzero_weight,
+                occ_pos_weight, svs_nonzero_weight, dice_weight,
             )
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -388,6 +427,7 @@ def main():
         model.eval()
         v_loss = v_occ = v_svs = 0.0
         v_iou = v_f1 = v_svs_nz = 0.0
+        v_svs_iou = v_svs_f1 = v_svs_mse_zero = 0.0
 
         with torch.no_grad():
             for batch in val_loader:
@@ -395,8 +435,9 @@ def main():
                 recon, *_ = model(batch)
                 loss, occ_l, svs_l = ae_loss(
                     recon, batch, occ_weight, svs_weight,
-                    occ_pos_weight, svs_nonzero_weight,
+                    occ_pos_weight, svs_nonzero_weight, dice_weight,
                 )
+
                 m = recon_metrics(recon, batch)
                 v_loss += loss.item()
                 v_occ += occ_l.item()
@@ -404,6 +445,9 @@ def main():
                 v_iou += m["occ_iou"]
                 v_f1 += m["occ_f1"]
                 v_svs_nz += m["svs_mse_nonzero"]
+                v_svs_iou += m["svs_iou"]
+                v_svs_f1 += m["svs_f1"]
+                v_svs_mse_zero += m["svs_mse_zero"]
 
         n_val = len(val_loader)
         v_loss /= n_val
@@ -412,12 +456,16 @@ def main():
         v_iou /= n_val
         v_f1 /= n_val
         v_svs_nz /= n_val
+        v_svs_iou /= n_val
+        v_svs_f1 /= n_val
+        v_svs_mse_zero /= n_val
 
         scheduler.step(v_loss)
 
         print(f"Epoch {epoch:3d}/{epochs} | "
               f"train={t_loss:.4f} (occ={t_occ:.4f} svs={t_svs:.4f}) | "
-              f"val={v_loss:.4f} | occ_IoU={v_iou:.3f} F1={v_f1:.3f}")
+              f"val={v_loss:.4f} | occ_IoU={v_iou:.3f} F1={v_f1:.3f} | "
+              f"svs_IoU={v_svs_iou:.3f} svs_mse_zero={v_svs_mse_zero:.4f}")
 
         # ── tensorboard ───────────────────────────────────────────────────
         writer.add_scalars("loss", {"train": t_loss, "val": v_loss}, epoch)
@@ -425,7 +473,10 @@ def main():
         writer.add_scalars("svs_loss", {"train": t_svs, "val": v_svs}, epoch)
         writer.add_scalar("val/occ_iou", v_iou, epoch)
         writer.add_scalar("val/occ_f1", v_f1, epoch)
+        writer.add_scalar("val/svs_iou", v_svs_iou, epoch)
+        writer.add_scalar("val/svs_f1", v_svs_f1, epoch)
         writer.add_scalar("val/svs_mse_nonzero", v_svs_nz, epoch)
+        writer.add_scalar("val/svs_mse_zero", v_svs_mse_zero, epoch)
 
         # ── wandb ─────────────────────────────────────────────────────────
         wandb.log({
@@ -438,7 +489,10 @@ def main():
             "val/svs_loss": v_svs,
             "val/occ_iou": v_iou,
             "val/occ_f1": v_f1,
+            "val/svs_iou": v_svs_iou,                 # ← sweep target
+            "val/svs_f1": v_svs_f1,
             "val/svs_mse_nonzero": v_svs_nz,
+            "val/svs_mse_zero": v_svs_mse_zero,       # ← FP-smear detector
         })
 
         # ── visualization ─────────────────────────────────────────────────
@@ -470,7 +524,8 @@ def main():
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
     model.eval()
 
-    test_metrics = run_test(model, test_loader, device, occ_weight, svs_weight)
+    test_metrics = run_test(model, test_loader, device, occ_weight, svs_weight,
+                            occ_pos_weight, svs_nonzero_weight, dice_weight)
     print("Test metrics:")
     for k, v in test_metrics.items():
         print(f"  {k}: {v:.4f}")
