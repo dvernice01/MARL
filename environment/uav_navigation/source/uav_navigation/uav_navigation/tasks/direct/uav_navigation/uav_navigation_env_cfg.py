@@ -118,6 +118,13 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     thrust_to_weight = 1.9
     moment_scale = 0.01
 
+    #------------ occupancy map parameters
+        # ── Online occupancy mapping ─────────────────────────────────────────
+    occ_cell_size: float = 0.25
+    occ_ray_subsample: int = 8
+    occ_samples_per_ray: int = 40
+
+
     camera = CameraCfg(
         prim_path="/World/envs/env_.*/Robot/body/front_cam",  # aggiungere o togliere /Robot/body prima di front_cam in base a se stai collezionando dati o facendo RL
         update_period=0.1,
