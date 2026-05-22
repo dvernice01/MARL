@@ -64,56 +64,6 @@ LOCAL_CELL_SIZE = 0.25
 ONLINE_OCC_VIZ_EVERY = 500    # steps between online-OCC sanity plots; 0 to disable
 
 
-def visualize_occupancy_3d(occ_map: torch.Tensor, save_path: str = "occupancy_map.png"):
-    """
-    3D scatter plot of the global occupancy map (OCCUPIED voxels only).
-    occ_map: (n_z, n_y, n_x) tensor with values {0=UNKNOWN, 1=FREE, 2=OCCUPIED}
-    Axes are labelled in voxel index space (z-first layout).
-    """
-    # occ_map is (n_z, n_y, n_x) — torch.where returns indices in that order
-    iz, iy, ix = torch.where(occ_map == 2)
-    iz = iz.detach().cpu().numpy()
-    iy = iy.detach().cpu().numpy()
-    ix = ix.detach().cpu().numpy()
-
-    fig = plt.figure(figsize=(10, 7))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(ix, iy, iz, s=1, c='red', alpha=0.3, marker='s')
-    ax.set_xlabel("x (voxels)")
-    ax.set_ylabel("y (voxels)")
-    ax.set_zlabel("z (voxels)")
-    ax.set_title(f"Global Occupancy Map — {iz.shape[0]} occupied voxels")
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    print(f"[visualize_occupancy_3d] Saved → {save_path}")
-    plt.close()
-
-
-def hits_to_occupancy_map(ray_hits_w, grid_size=0.05, map_dims=(200, 200, 100), origin=None):
-    pts = ray_hits_w.reshape(-1, 3)
-    valid = torch.isfinite(pts).all(dim=-1)
-    pts = pts[valid]
-    if origin is None:
-        origin = torch.zeros(3, device=pts.device)
-    else:
-        origin = torch.tensor(origin, device=pts.device, dtype=pts.dtype)
-    cx = map_dims[0] // 2
-    cy = map_dims[1] // 2
-    cz = map_dims[2] // 2
-    ix = ((pts[:, 0] - origin[0]) / grid_size + cx).long()
-    iy = ((pts[:, 1] - origin[1]) / grid_size + cy).long()
-    iz = ((pts[:, 2] - origin[2]) / grid_size + cz).long()
-    mask = (
-        (ix >= 0) & (ix < map_dims[0]) &
-        (iy >= 0) & (iy < map_dims[1]) &
-        (iz >= 0) & (iz < map_dims[2])
-    )
-    ix, iy, iz = ix[mask], iy[mask], iz[mask]
-    occ_map = torch.zeros(map_dims, dtype=torch.float32, device=pts.device)
-    occ_map[iz, iy, ix] = 1.0
-    return occ_map
-
-
 class PolicyNet(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -522,6 +472,128 @@ class VAEImageEncoder:
         cam_pos_body = quat_apply(body_quat_inv, cam_centered)    # (N, 3)
 
         return points_body, cam_pos_body
+    
+
+class autoencoder_3d:
+    """
+    Builds and maintains the per-env online 3D occupancy map and the
+    Spatial Visit Score (SVS) map used as input to the 3D encoder.
+
+    Holds a reference to the owning UavNavigationEnv so it can read the
+    robot state, camera data and config; it owns the map tensors itself.
+    """
+
+    def __init__(self, env: "UavNavigationEnv"):
+        self.env = env
+        device = env.device
+
+        # ── Per-env online occupancy map ──────────────────────────────────
+        # Stored at LOCAL_CELL_SIZE; values: 0=UNKNOWN, 1=FREE, 2=OCCUPIED.
+        self.occ_cell_size = float(env.cfg.occ_cell_size)
+        self.occ_origin = torch.tensor(
+            [env.x_min, env.y_min, env.z_min],
+            dtype=torch.float32, device=device,
+        )
+        self.NX = int(math.ceil((env.x_max - env.x_min) / self.occ_cell_size))
+        self.NY = int(math.ceil((env.y_max - env.y_min) / self.occ_cell_size))
+        self.NZ = int(math.ceil((env.z_max - env.z_min) / self.occ_cell_size))
+        self.occ_map_dims = (self.NZ, self.NY, self.NX)
+
+        self.global_occ_map = torch.zeros(
+            (env.num_envs, self.NZ, self.NY, self.NX),
+            dtype=torch.uint8, device=device,
+        )
+
+        # ── Visit counts at the same resolution as the OCC ─────────────────
+        self.global_visit_counts = torch.zeros(
+            (env.num_envs, self.NZ, self.NY, self.NX),
+            dtype=torch.float32, device=device,
+        )
+
+        # ── Local map shape — output stays (LOCAL_NZ, LOCAL_NY, LOCAL_NX) ──
+        self.local_nz = LOCAL_NZ
+        self.local_ny = LOCAL_NY
+        self.local_nx = LOCAL_NX
+        self.local_hz = LOCAL_NZ // 2
+        self.local_hy = LOCAL_NY // 2
+        self.local_hx = LOCAL_NX // 2
+
+    # ── SECTION 1.5: Online OCC update from depth camera (raycast) ────────────
+    def _update_occ_from_depth(self):
+        """
+        Vectorized raycast update of the per-env online occupancy map.
+
+        For every (subsampled) depth pixel:
+          1. Sample T points uniformly along the ray from the camera origin
+             to the world-frame depth endpoint.
+          2. Write FREE (1) at every in-bounds sample voxel.
+          3. Overwrite OCCUPIED (2) at the endpoint voxel iff the ray returned
+             a real hit (depth strictly below the far clipping plane).
+        """
+        env = self.env
+        sub = int(env.cfg.occ_ray_subsample)
+        T = int(env.cfg.occ_samples_per_ray)
+
+        # ── Depth: (N, H, W, 1) → subsampled (N, h, w) ────────────────────────
+        depth_full = env.camera.data.output["distance_to_camera"]
+        max_range = float(env.cfg.camera.spawn.clipping_range[1])
+        depth = depth_full[:, ::sub, ::sub, 0]
+        depth = torch.nan_to_num(depth, nan=max_range, posinf=max_range, neginf=max_range)
+        depth = torch.clamp(depth, 0.0, max_range)
+        N, h, w = depth.shape
+
+        # Rays whose endpoint clipped at the far plane → "no return" (FREE only).
+        is_hit = depth < (max_range - 1e-3)
+
+        # ── Unproject to camera frame ─────────────────────────────────────────
+        K = env.camera.data.intrinsic_matrices               # (N, 3, 3)
+        fx = K[:, 0, 0]; fy = K[:, 1, 1]
+        cx = K[:, 0, 2]; cy = K[:, 1, 2]
+
+        # Pixel coords are expressed in the ORIGINAL (un-subsampled) image so
+        # the intrinsics remain consistent.
+        vs = (torch.arange(0, h, device=env.device) * sub).float()
+        us = (torch.arange(0, w, device=env.device) * sub).float()
+        grid_v, grid_u = torch.meshgrid(vs, us, indexing="ij")  # (h, w)
+        grid_v = grid_v.unsqueeze(0).expand(N, -1, -1)          # (N, h, w)
+        grid_u = grid_u.unsqueeze(0).expand(N, -1, -1)
+
+        Xc = depth * (grid_u - cx[:, None, None]) / fx[:, None, None]
+        Yc = depth * (grid_v - cy[:, None, None]) / fy[:, None, None]
+        Zc = depth
+        points_cam = torch.stack([Xc, Yc, Zc], dim=-1).reshape(N, -1, 3)  # (N, h*w, 3)
+
+        # ── Rotate to world frame ─────────────────────────────────────────────
+        cam_pos_w = env.camera.data.pos_w            # (N, 3)
+        cam_quat_w = env.camera.data.quat_w_world    # (N, 4), w-first
+        quat_exp = cam_quat_w.unsqueeze(1).expand(-1, points_cam.shape[1], -1)
+        points_world = quat_apply(quat_exp, points_cam) + cam_pos_w.unsqueeze(1)  # (N, h*w, 3)
+
+        # ── Sample T points along each ray ────────────────────────────────────
+        t = torch.linspace(0.0, 1.0, T, device=env.device)
+        origin = cam_pos_w[:, None, None, :]          # (N, 1, 1, 3)
+        endpoint = points_world[:, :, None, :]        # (N, h*w, 1, 3)
+        samples = origin + t[None, None, :, None] * (endpoint - origin)  # (N, h*w, T, 3)
+
+        # ── Voxelize ──────────────────────────────────────────────────────────
+        cell = self.occ_cell_size
+        ix = ((samples[..., 0] - self.occ_origin[0]) / cell).long()
+        iy = ((samples[..., 1] - self.occ_origin[1]) / cell).long()
+        iz = ((samples[..., 2] - self.occ_origin[2]) / cell).long()
+        NZ, NY, NX = self.occ_map_dims
+        in_bounds = (
+            (ix >= 0) & (ix < NX) &
+            (iy >= 0) & (iy < NY) &
+            (iz >= 0) & (iz < NZ)
+        )  # (N, h*w, T)
+
+        # ── Write FREE (1) for every in-bounds sample ─────────────────────────
+        env_idx = torch.arange(N, device=env.device).view(N, 1, 1).expand(-1, h * w, T)
+        flat_e = env_idx[in_bounds]
+        flat_iz = iz[in_bounds]
+        flat_iy = iy[in_bounds]
+        flat_ix = ix[in_bounds]
+        self.global_occ_map[flat_e, flat_iz, flat_iy, flat_ix] = 1
 
 
 
@@ -570,14 +642,14 @@ class UavNavigationEnv(DirectRLEnv):
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
-        self.set_debug_vis(self.cfg.debug_vis)
+        #self.set_debug_vis(self.cfg.debug_vis)
 
         self.distance_to_bounds_x = torch.zeros(self.num_envs, device=self.device)
         self.distance_to_bounds_y = torch.zeros(self.num_envs, device=self.device)
         self.final_distance_to_goal_b = torch.zeros(self.num_envs, device=self.device)
 
-        self.curriculum_level = 0
-        self.arena_size = torch.ones(self.num_envs, device=self.device) * 4.0
+        #self.curriculum_level = 0
+        #self.arena_size = torch.ones(self.num_envs, device=self.device) * 4.0
 
         self.accum_deaths = 0.0
         self.accum_timeouts = 0.0
@@ -587,245 +659,15 @@ class UavNavigationEnv(DirectRLEnv):
         self.policy_network = self._load_policy_network()
         self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
 
-        # ── SECTION 1: Per-env online occupancy map ───────────────────────────
-        # Stored directly at LOCAL_CELL_SIZE; values: 0=UNKNOWN, 1=FREE, 2=OCCUPIED.
-        self.occ_cell_size = float(self.cfg.occ_cell_size)
-        self.occ_origin = torch.tensor(
-            [self.x_min, self.y_min, self.z_min],
-            dtype=torch.float32, device=self.device,
-        )
-        NX = int(math.ceil((self.x_max - self.x_min) / self.occ_cell_size))
-        NY = int(math.ceil((self.y_max - self.y_min) / self.occ_cell_size))
-        NZ = int(math.ceil((self.z_max - self.z_min) / self.occ_cell_size))
-        self.occ_map_dims = (NZ, NY, NX)
-
-        self.global_occ_map = torch.zeros(
-            (self.num_envs, NZ, NY, NX),
-            dtype=torch.uint8, device=self.device,
-        )
-
-        # ── Local map shape — output stays (LOCAL_NZ, LOCAL_NY, LOCAL_NX) ─────
-        self.local_nz = LOCAL_NZ
-        self.local_ny = LOCAL_NY
-        self.local_nx = LOCAL_NX
-        self.local_hz = LOCAL_NZ // 2
-        self.local_hy = LOCAL_NY // 2
-        self.local_hx = LOCAL_NX // 2
-
-        # ── SECTION 2: Visit counts at the same resolution as the OCC ─────────
-        self.global_visit_counts = torch.zeros(
-            (self.num_envs, NZ, NY, NX),
-            dtype=torch.float32, device=self.device,
-        )
+        self.vae_encoder = VAEImageEncoder(vae_config, device=self.device)
+        self.max_depth = 10.0  
+        # 3D occupancy / SVS map builder — owns global_occ_map & global_visit_counts
+        self.autoencoder3D = autoencoder_3d(self)
 
         os.makedirs(LOCAL_MAPS_SAVE_DIR, exist_ok=True)
-        print(f"[LocalMap] Online OCC: shape={self.occ_map_dims}, cell={self.occ_cell_size} m")
+        print(f"[LocalMap] Online OCC: shape={self.autoencoder3D.occ_map_dims}, "
+              f"cell={self.autoencoder3D.occ_cell_size} m")
 
-    # ── SECTION 1.5: Online OCC update from depth camera (raycast) ────────────
-    def _update_occ_from_depth(self):
-        """
-        Vectorized raycast update of the per-env online occupancy map.
-
-        For every (subsampled) depth pixel:
-          1. Sample T points uniformly along the ray from the camera origin
-             to the world-frame depth endpoint.
-          2. Write FREE (1) at every in-bounds sample voxel.
-          3. Overwrite OCCUPIED (2) at the endpoint voxel iff the ray returned
-             a real hit (depth strictly below the far clipping plane).
-        """
-        sub = int(self.cfg.occ_ray_subsample)
-        T = int(self.cfg.occ_samples_per_ray)
-
-        # ── Depth: (N, H, W, 1) → subsampled (N, h, w) ────────────────────────
-        depth_full = self.camera.data.output["distance_to_camera"]
-        max_range = float(self.cfg.camera.spawn.clipping_range[1])
-        depth = depth_full[:, ::sub, ::sub, 0]
-        depth = torch.nan_to_num(depth, nan=max_range, posinf=max_range, neginf=max_range)
-        depth = torch.clamp(depth, 0.0, max_range)
-        N, h, w = depth.shape
-
-        # Rays whose endpoint clipped at the far plane → "no return" (FREE only).
-        is_hit = depth < (max_range - 1e-3)
-
-        # ── Unproject to camera frame ─────────────────────────────────────────
-        K = self.camera.data.intrinsic_matrices               # (N, 3, 3)
-        fx = K[:, 0, 0]; fy = K[:, 1, 1]
-        cx = K[:, 0, 2]; cy = K[:, 1, 2]
-
-        # Pixel coords are expressed in the ORIGINAL (un-subsampled) image so
-        # the intrinsics remain consistent.
-        vs = (torch.arange(0, h, device=self.device) * sub).float()
-        us = (torch.arange(0, w, device=self.device) * sub).float()
-        grid_v, grid_u = torch.meshgrid(vs, us, indexing="ij")  # (h, w)
-        grid_v = grid_v.unsqueeze(0).expand(N, -1, -1)          # (N, h, w)
-        grid_u = grid_u.unsqueeze(0).expand(N, -1, -1)
-
-        Xc = depth * (grid_u - cx[:, None, None]) / fx[:, None, None]
-        Yc = depth * (grid_v - cy[:, None, None]) / fy[:, None, None]
-        Zc = depth
-        points_cam = torch.stack([Xc, Yc, Zc], dim=-1).reshape(N, -1, 3)  # (N, h*w, 3)
-
-        # ── Rotate to world frame ─────────────────────────────────────────────
-        cam_pos_w = self.camera.data.pos_w            # (N, 3)
-        cam_quat_w = self.camera.data.quat_w_world    # (N, 4), w-first
-        quat_exp = cam_quat_w.unsqueeze(1).expand(-1, points_cam.shape[1], -1)
-        points_world = quat_apply(quat_exp, points_cam) + cam_pos_w.unsqueeze(1)  # (N, h*w, 3)
-
-        # ── Sample T points along each ray ────────────────────────────────────
-        t = torch.linspace(0.0, 1.0, T, device=self.device)
-        origin = cam_pos_w[:, None, None, :]          # (N, 1, 1, 3)
-        endpoint = points_world[:, :, None, :]        # (N, h*w, 1, 3)
-        samples = origin + t[None, None, :, None] * (endpoint - origin)  # (N, h*w, T, 3)
-
-        # ── Voxelize ──────────────────────────────────────────────────────────
-        cell = self.occ_cell_size
-        ix = ((samples[..., 0] - self.occ_origin[0]) / cell).long()
-        iy = ((samples[..., 1] - self.occ_origin[1]) / cell).long()
-        iz = ((samples[..., 2] - self.occ_origin[2]) / cell).long()
-        NZ, NY, NX = self.occ_map_dims
-        in_bounds = (
-            (ix >= 0) & (ix < NX) &
-            (iy >= 0) & (iy < NY) &
-            (iz >= 0) & (iz < NZ)
-        )  # (N, h*w, T)
-
-        # ── Write FREE (1) for every in-bounds sample ─────────────────────────
-        env_idx = torch.arange(N, device=self.device).view(N, 1, 1).expand(-1, h * w, T)
-        flat_e = env_idx[in_bounds]
-        flat_iz = iz[in_bounds]
-        flat_iy = iy[in_bounds]
-        flat_ix = ix[in_bounds]
-        self.global_occ_map[flat_e, flat_iz, flat_iy, flat_ix] = 1
-
-        # ── Overwrite OCCUPIED (2) at endpoints of HIT rays ───────────────────
-        end_ix = ix[:, :, -1]
-        end_iy = iy[:, :, -1]
-        end_iz = iz[:, :, -1]
-        end_in = in_bounds[:, :, -1] & is_hit.reshape(N, -1)              # (N, h*w)
-        env_idx_end = torch.arange(N, device=self.device).view(N, 1).expand(-1, h * w)
-        self.global_occ_map[
-            env_idx_end[end_in], end_iz[end_in], end_iy[end_in], end_ix[end_in]
-        ] = 2
-
-    # ── SECTION 2: Update visit counts (call every step) ──────────────────────
-    def _update_visit_counts(self, env_ids: torch.Tensor | None = None):
-        """Increment the visit count voxel at each drone's current position."""
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, device=self.device)
-
-        pos_w = self._robot.data.root_pos_w[env_ids]  # (E, 3)
-
-        iz = ((pos_w[:, 2] - self.occ_origin[2]) / self.occ_cell_size).long()
-        iy = ((pos_w[:, 1] - self.occ_origin[1]) / self.occ_cell_size).long()
-        ix = ((pos_w[:, 0] - self.occ_origin[0]) / self.occ_cell_size).long()
-
-        NZ, NY, NX = self.occ_map_dims
-        valid = (iz >= 0) & (iz < NZ) & (iy >= 0) & (iy < NY) & (ix >= 0) & (ix < NX)
-
-        if valid.any():
-            ve = env_ids[valid]
-            self.global_visit_counts[ve, iz[valid], iy[valid], ix[valid]] += 1.0
-
-    # ── SECTION 2: Build local SVS map ────────────────────────────────────────
-    def _build_local_svs_map(self, env_id: int) -> torch.Tensor:
-        pos_w = self._robot.data.root_pos_w[env_id]
-        cz = int((pos_w[2] - self.occ_origin[2]) / self.occ_cell_size)
-        cy = int((pos_w[1] - self.occ_origin[1]) / self.occ_cell_size)
-        cx = int((pos_w[0] - self.occ_origin[0]) / self.occ_cell_size)
-
-        NZ, NY, NX = self.occ_map_dims
-        z0, z1 = cz - self.local_hz, cz + self.local_hz
-        y0, y1 = cy - self.local_hy, cy + self.local_hy
-        x0, x1 = cx - self.local_hx, cx + self.local_hx
-
-        counts = torch.zeros(
-            (self.local_nz, self.local_ny, self.local_nx),
-            dtype=torch.float32, device=self.device,
-        )
-        sz0, sz1 = max(z0, 0), min(z1, NZ)
-        sy0, sy1 = max(y0, 0), min(y1, NY)
-        sx0, sx1 = max(x0, 0), min(x1, NX)
-        if sz0 < sz1 and sy0 < sy1 and sx0 < sx1:
-            counts[sz0 - z0:sz1 - z0, sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = \
-                self.global_visit_counts[env_id, sz0:sz1, sy0:sy1, sx0:sx1]
-
-        Nt = counts.sum()
-        svs = torch.zeros_like(counts)
-        if Nt > 0:
-            p = counts / Nt
-            svs = torch.where(p > 0, -p * torch.log(p), svs)
-            local_occ = self._build_local_occ_map(env_id)
-            svs[local_occ > 0.5] = 0.0
-        return svs
-    # ── SECTION 3: Sample local occupancy map from per-env online OCC ─────────
-    def _build_local_occ_map(self, env_id: int) -> torch.Tensor:
-        pos_w = self._robot.data.root_pos_w[env_id]
-        cz = int((pos_w[2] - self.occ_origin[2]) / self.occ_cell_size)
-        cy = int((pos_w[1] - self.occ_origin[1]) / self.occ_cell_size)
-        cx = int((pos_w[0] - self.occ_origin[0]) / self.occ_cell_size)
-
-        NZ, NY, NX = self.occ_map_dims
-        z0, z1 = cz - self.local_hz, cz + self.local_hz
-        y0, y1 = cy - self.local_hy, cy + self.local_hy
-        x0, x1 = cx - self.local_hx, cx + self.local_hx
-
-        local_occ = torch.zeros(
-            (self.local_nz, self.local_ny, self.local_nx),
-            dtype=torch.float32, device=self.device,
-        )
-        sz0, sz1 = max(z0, 0), min(z1, NZ)
-        sy0, sy1 = max(y0, 0), min(y1, NY)
-        sx0, sx1 = max(x0, 0), min(x1, NX)
-        if sz0 < sz1 and sy0 < sy1 and sx0 < sx1:
-            raw = self.global_occ_map[env_id, sz0:sz1, sy0:sy1, sx0:sx1]
-            local_occ[sz0 - z0:sz1 - z0, sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = \
-                (raw == 2).float()
-        return local_occ
-
-    # ── SECTION 4: Stack the two maps as separate channels ────────────────────
-    def _build_local_combined_map(self, env_id: int) -> torch.Tensor:
-        """
-        Returns (2, 8, 16, 16):
-          channel 0 = local SVS  (Shannon entropy of visit distribution)
-          channel 1 = local binary occupancy
-        """
-        local_svs = self._build_local_svs_map(env_id)   # (8, 16, 16)
-        local_occ = self._build_local_occ_map(env_id)   # (8, 16, 16)
-        return torch.stack([local_occ, local_svs], dim=0)  # (2, 8, 16, 16)
-
-    # ── Debug: periodic 3D scatter of the per-env online OCC ──────────────────
-    def _save_online_occ_viz(self, env_id: int = 0, save_dir: str | None = None):
-        if save_dir is None:
-            save_dir = "/workspace/environment/uav_navigation/outputs"
-        os.makedirs(save_dir, exist_ok=True)
-        step = self.common_step_counter
-
-        occ = self.global_occ_map[env_id]
-        iz, iy, ix = torch.where(occ == 2)
-        iz = iz.detach().cpu().numpy()
-        iy = iy.detach().cpu().numpy()
-        ix = ix.detach().cpu().numpy()
-
-        fig = plt.figure(figsize=(10, 7))
-        ax = fig.add_subplot(111, projection="3d")
-        ax.scatter(ix, iy, iz, s=2, c="red", alpha=0.4, marker="s")
-        ax.set_xlabel("x (voxels)")
-        ax.set_ylabel("y (voxels)")
-        ax.set_zlabel("z (voxels)")
-        ax.set_title(f"Online OCC env{env_id} step{step} — {iz.shape[0]} occupied voxels")
-        plt.tight_layout()
-        save_path = os.path.join(save_dir, f"online_occ_env{env_id}_step{step}.png")
-        plt.savefig(save_path, dpi=120, bbox_inches="tight")
-        plt.close()
-
-    # ── SECTION 5: Save combined maps ─────────────────────────────────────────
-    def _save_local_maps(self, env_ids: torch.Tensor):                                                                                                                   
-        """Save combined (2, 8, 16, 16) maps for alive envs to disk."""
-        step = self.common_step_counter                                                                                                                                  
-        for env_id in env_ids.tolist():
-            combined = self._build_local_combined_map(env_id)                                                                                                            
-            path = os.path.join(LOCAL_MAPS_SAVE_DIR, f"env{env_id}_step{step}.npy")                                                                                      
-            np.save(path, combined.cpu().numpy()) 
 
     def _load_policy_network(self):
         checkpoint = torch.load(
@@ -838,19 +680,6 @@ class UavNavigationEnv(DirectRLEnv):
         self.ll_running_variance = preprocessor["running_variance"].float().to(self.device)
         self.ll_epsilon          = 1e-8
         self.ll_clip_threshold   = 5.0
-
-        class PolicyNet(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.net = torch.nn.Sequential(
-                    torch.nn.Linear(13, 256),
-                    torch.nn.ELU(),
-                    torch.nn.Linear(256, 256),
-                    torch.nn.ELU(),
-                    torch.nn.Linear(256, 4),
-                )
-            def forward(self, x):
-                return self.net(x)
 
         policy = PolicyNet()
         missing, unexpected = policy.load_state_dict(checkpoint["policy"], strict=False)
@@ -908,10 +737,10 @@ class UavNavigationEnv(DirectRLEnv):
 
     def _get_observations(self) -> dict:
         # ── Refresh online OCC from the depth camera BEFORE anything else ─────
-        self._update_occ_from_depth()
+        self.autoencoder3D._update_occ_from_depth()
 
         # ── Update visit counts at every step (all envs) ──────────────────────
-        self._update_visit_counts()
+        self.autoencoder3D._update_visit_counts()
 
         # ── Save combined maps periodically ───────────────────────────────────
         origins = self.scene.env_origins                                                                                                                                     
@@ -930,11 +759,11 @@ class UavNavigationEnv(DirectRLEnv):
         if LOCAL_MAP_SAVE_EVERY > 0 and self.common_step_counter >= LOCAL_MAP_START_STEP and self.common_step_counter % LOCAL_MAP_SAVE_EVERY == 0:                                                                               
             eligible = (self.alive_steps >= MIN_ALIVE_STEPS_TO_SAVE).nonzero(as_tuple=False).view(-1)
             if eligible.numel() > 0:                                                                                                                                         
-                self._save_local_maps(eligible) 
+                self.autoencoder3D._save_local_maps(eligible) 
                 # ── Periodic sanity plot of the per-env online OCC (env 0) ────────────
         if ONLINE_OCC_VIZ_EVERY > 0 and self.common_step_counter > 0 \
                 and self.common_step_counter % ONLINE_OCC_VIZ_EVERY == 0:
-            self._save_online_occ_viz(env_id=0)
+            self.autoencoder3D._save_online_occ_viz(env_id=0)
 
         self.rel_pos_b, _ = subtract_frame_transforms(
             self._robot.data.root_pos_w,
@@ -1070,7 +899,7 @@ class UavNavigationEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self.alive_steps[env_ids] = 0.0
         # ── Reset per-env online OCC for terminated envs ──────────────────────
-        self.global_occ_map[env_ids] = 0
+        self.autoencoder3D.global_occ_map[env_ids] = 0
 
         n = len(env_ids)
         self._desired_pos_w[env_ids, 0] = torch.zeros_like(
@@ -1101,7 +930,7 @@ class UavNavigationEnv(DirectRLEnv):
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
         # ── Reset visit counts for terminated envs ────────────────────────────
-        self.global_visit_counts[env_ids] = 0.0
+        self.autoencoder3D.global_visit_counts[env_ids] = 0.0
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         pass

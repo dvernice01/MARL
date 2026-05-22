@@ -7,6 +7,7 @@
 IsaacLab/
 vae_container/Vae/checkpoint/
 vae_container/Vae/runs/
+vae_container/Vae/run_for_thesis/
 vae_container/Vae/*.log
 vae_container/Vae/debug_epochs/
 vae_container/Vae/outputs/
@@ -35,6 +36,7 @@ _isaac_sim/
 _ext/
 *.webm
 *.mp4
+*.csv
 
 # --- Machine Learning & Training Bloat ---
 # Blocks all weights, data, and TensorBoard logs

@@ -137,32 +137,27 @@ def soft_dice_loss(pred, target, eps=1e-6):
     return 1.0 - dice.mean()
 
 def ae_loss(recon, target, occ_weight=1.0, svs_weight=1.0,
-            occ_pos_weight=12.0, svs_nonzero_weight=5.0, dice_weight=0.0):
-    """recon = raw decoder logits (with_logits=True). ch0 = occupancy, ch1 = SVS.
-
-    Per-channel loss = (BCE or weighted-MSE)  +  dice_weight · soft-Dice.
-    BCE/MSE give stable per-voxel gradients; the Dice term optimizes set
-    overlap and punishes the low-magnitude inflation halo.
-    """
-    # ── occupancy: pos-weighted BCE + Dice ────────────────────────────────
+            occ_pos_weight=12.0, svs_nonzero_weight=5.0,
+            occ_dice_weight=0.0, svs_dice_weight=0.0):
     occ_logits = recon[:, 0:1]
     occ_target = target[:, 0:1]
     pw = torch.tensor(occ_pos_weight, device=recon.device)
-    occ_bce = F.binary_cross_entropy_with_logits(occ_logits, occ_target, pos_weight=pw)
+    occ_bce  = F.binary_cross_entropy_with_logits(occ_logits, occ_target, pos_weight=pw)
     occ_dice = soft_dice_loss(torch.sigmoid(occ_logits), occ_target)
-    occ_loss = occ_bce + dice_weight * occ_dice
 
-    # ── SVS: weighted MSE (+ sparsity) + Dice on the visit SET ────────────
     svs_pred = torch.sigmoid(recon[:, 1:2])
     svs_target = target[:, 1:2]
     w = 1.0 + svs_nonzero_weight * (svs_target > 0).float()
-    svs_mse = (w * (svs_pred - svs_target) ** 2).sum() / w.sum() \
-              + 0.05 * svs_pred.mean()
+    svs_mse  = (w * (svs_pred - svs_target) ** 2).sum() / w.sum() + 0.05 * svs_pred.mean()
     svs_dice = soft_dice_loss(svs_pred, (svs_target > 0).float())
-    svs_loss = svs_mse + dice_weight * svs_dice
 
-    total = occ_weight * occ_loss + svs_weight * svs_loss
+    # Four independently-weighted terms. Dice terms are NOT multiplied by the
+    # channel weights, so a strong SVS-Dice can no longer starve OCC.
+    occ_loss = occ_weight * occ_bce + occ_dice_weight * occ_dice
+    svs_loss = svs_weight * svs_mse + svs_dice_weight * svs_dice
+    total = occ_loss + svs_loss
     return total, occ_loss, svs_loss
+
 
 @torch.no_grad()
 def recon_metrics(recon, target, occ_thresh=0.5, svs_thresh=0.15):
@@ -190,19 +185,20 @@ def recon_metrics(recon, target, occ_thresh=0.5, svs_thresh=0.15):
     svs_mse_zero = (svs_p[~m] ** 2).mean().item() if (~m).any() else 0.0   # squared prediction averaged only over true-zero voxels 
 
     return {
-        "occ_iou": (inter / union).item(),
-        "occ_f1":  (2*tp / (2*tp + fp_o + fn_o).clamp(min=1)).item(),
-        "svs_iou": (s_tp / s_union).item(), #The honest SVS quality metric. Penalizes both missing real visits and fake predicted visits in empty space
-        "svs_f1":  (2*s_tp / (2*s_tp + s_fp + s_fn).clamp(min=1)).item(),
-        "svs_mse_nonzero": svs_mse_nz,
-        "svs_mse_zero":    svs_mse_zero,
+        "occ_iou": (inter / union).item(), # massimizzata -> rapporto tra occupanza predetta e reale per occ
+        "occ_f1":  (2*tp / (2*tp + fp_o + fn_o).clamp(min=1)).item(), # massimizzata -> 2*IoU/ (1+IoU)
+        "svs_iou": (s_tp / s_union).item(), # massimizzata -> rapporto tra occupanza predetta e reale per svs
+        "svs_f1":  (2*s_tp / (2*s_tp + s_fp + s_fn).clamp(min=1)).item(), # massimizzata -> 2*IoU/ (1+IoU) 
+        "svs_mse_nonzero": svs_mse_nz, # minimizzata -> mse su voxel visitati
+        "svs_mse_zero":    svs_mse_zero, # minimizzata -> mse su voxel non visitati
     }
 
 # ── TEST (frozen split, evaluated once at the end) ───────────────────────────
 
 @torch.no_grad()
 def run_test(model, test_loader, device, occ_weight=1.0, svs_weight=1.0,
-             occ_pos_weight=12.0, svs_nonzero_weight=5.0, dice_weight=0.0):
+             occ_pos_weight=12.0, svs_nonzero_weight=5.0,
+             occ_dice_weight=0.0, svs_dice_weight=0.0):
     model.eval()
     keys = ["loss", "occ", "svs",
             "occ_iou", "occ_f1",
@@ -213,7 +209,8 @@ def run_test(model, test_loader, device, occ_weight=1.0, svs_weight=1.0,
         batch = batch.to(device)
         recon, *_ = model(batch)
         loss, occ_l, svs_l = ae_loss(recon, batch, occ_weight, svs_weight,
-                                     occ_pos_weight, svs_nonzero_weight, dice_weight)
+                                     occ_pos_weight, svs_nonzero_weight,
+                                     occ_dice_weight, svs_dice_weight)
         m = recon_metrics(recon, batch)
         tot["loss"] += loss.item()
         tot["occ"] += occ_l.item()
@@ -302,12 +299,19 @@ def visualize_3d(model, dataset, device, epoch, save_dir="debug_epochs"):
                 ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
 
                 ax2 = fig.add_subplot(2, 3, row * 3 + 2, projection="3d")
-                threshold = max(svs.max() * 0.05, 1e-6)
-                iz2, iy2, ix2 = np.where(svs > threshold)
-                vals = svs[iz2, iy2, ix2] if len(iz2) > 0 else []
+                # Fixed display threshold + fixed [0,1] colour scale so the
+                # Target and Recon SVS panels are directly comparable by eye
+                # (SVS is normalised to [0,1]). Per-panel auto-scaling hid the
+                # magnitude over-prediction.
+                # Matches recon_metrics' svs_thresh so the plot shows exactly
+                # the voxels the svs_iou metric scores — keep the two in sync.
+                SVS_VIS_THRESH = 0.15
+                iz2, iy2, ix2 = np.where(svs > SVS_VIS_THRESH)
                 if len(iz2) > 0:
+                    vals = svs[iz2, iy2, ix2]
                     sc = ax2.scatter(ix2, iy2, iz2, s=20, c=vals,
-                                     cmap="viridis", alpha=0.5, marker="s")
+                                     cmap="viridis", alpha=0.5, marker="s",
+                                     vmin=0.0, vmax=1.0)
                     fig.colorbar(sc, ax=ax2, shrink=0.5)
                 ax2.set_xlim(0, 15); ax2.set_ylim(0, 15); ax2.set_zlim(0, 7)
                 ax2.set_title(f"{label} SVS")
@@ -383,7 +387,8 @@ def main():
     svs_weight = cfg.svs_weight
     occ_pos_weight = cfg.get("occ_pos_weight", 12.0)
     svs_nonzero_weight = cfg.get("svs_nonzero_weight", 50.0)
-    dice_weight = cfg.get("dice_weight", 0.0)
+    occ_dice_weight = cfg.get("occ_dice_weight", 0.0)
+    svs_dice_weight = cfg.get("svs_dice_weight", 0.0)
 
     # ── tensorboard ───────────────────────────────────────────────────────
     writer = SummaryWriter(os.path.join(run_dir, "tensorboard"))
@@ -408,7 +413,8 @@ def main():
             recon, *_ = model(batch)
             loss, occ_l, svs_l = ae_loss(
                 recon, batch, occ_weight, svs_weight,
-                occ_pos_weight, svs_nonzero_weight, dice_weight,
+                occ_pos_weight, svs_nonzero_weight,
+                occ_dice_weight, svs_dice_weight,
             )
 
             loss.backward()
@@ -435,7 +441,8 @@ def main():
                 recon, *_ = model(batch)
                 loss, occ_l, svs_l = ae_loss(
                     recon, batch, occ_weight, svs_weight,
-                    occ_pos_weight, svs_nonzero_weight, dice_weight,
+                    occ_pos_weight, svs_nonzero_weight,
+                    occ_dice_weight, svs_dice_weight,
                 )
 
                 m = recon_metrics(recon, batch)
@@ -525,7 +532,8 @@ def main():
     model.eval()
 
     test_metrics = run_test(model, test_loader, device, occ_weight, svs_weight,
-                            occ_pos_weight, svs_nonzero_weight, dice_weight)
+                            occ_pos_weight, svs_nonzero_weight,
+                            occ_dice_weight, svs_dice_weight)
     print("Test metrics:")
     for k, v in test_metrics.items():
         print(f"  {k}: {v:.4f}")
