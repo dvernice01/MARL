@@ -55,7 +55,8 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     decimation= 10
     decimation_low_level = 2
     action_space = 4
-    observation_space = 15
+    observation_space = 719 # (15 + 512 * 2 + 192 * 2) 
+    # perchè nel codice le funzione dense restituivano latent_dim * 2
     state_space = 0
     debug_vis = True
 
@@ -108,7 +109,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=3, env_spacing=2.5, replicate_physics=True
+        num_envs=1, env_spacing=2.5, replicate_physics=True
     )
 
     # robot
