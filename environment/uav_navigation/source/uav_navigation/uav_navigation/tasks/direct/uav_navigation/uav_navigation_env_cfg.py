@@ -18,7 +18,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import subtract_frame_transforms
-from isaaclab.sensors import CameraCfg, RayCasterCfg, patterns
+from isaaclab.sensors import CameraCfg, MultiMeshRayCasterCfg, RayCasterCfg, patterns
 ##
 # Pre-defined configs
 ##
@@ -117,12 +117,28 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     )
     thrust_to_weight = 1.9
     moment_scale = 0.01
-
-    #------------ occupancy map parameters
-        # ── Online occupancy mapping ─────────────────────────────────────────
+    
+    # ── Online occupancy mapping ─────────────────────────────────────────
     occ_cell_size: float = 0.25
-    occ_ray_subsample: int = 8
-    occ_samples_per_ray: int = 40
+    occ_samples_per_ray: int = 40   # voxels sampled along each LiDAR ray for FREE marking
+
+    # Drone-mounted 360x90 LiDAR raycaster — feeds the OCC map.
+    # Mesh prim paths are injected at runtime in UavNavigationEnv._setup_scene
+    # once the warehouse USD is loaded.
+    ray_caster: MultiMeshRayCasterCfg = MultiMeshRayCasterCfg(
+        prim_path="/World/envs/env_.*/Robot/body",
+        update_period=0.0,
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0)),
+        ray_alignment="yaw",
+        mesh_prim_paths=[],  # populated at runtime
+        pattern_cfg=patterns.LidarPatternCfg(
+            channels=32,
+            vertical_fov_range=(-45.0, 45.0),
+            horizontal_fov_range=(-180.0, 180.0),
+            horizontal_res=1.0,
+        ),
+        debug_vis=False,
+    )
 
 
     camera = CameraCfg(

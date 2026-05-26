@@ -3,15 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-
-
 """
 Buonds full_warehouse:
 X: -28.00 → 8.00  (width=36.00m)
 Y: -41.40 → 33.42  (depth=74.82m)
 Z: -0.01 → 9.30  (height=9.31m)
 """
-
 
 from __future__ import annotations
 
@@ -38,22 +35,24 @@ import isaaclab.utils.math as math_utils
 from .uav_navigation_env_cfg import UavNavigationEnvCfg
 from isaaclab_assets import CRAZYFLIE_CFG
 from isaaclab.markers import CUBOID_MARKER_CFG
-from isaaclab.sensors import Camera, CameraCfg, RayCaster, CameraCfg
+from isaaclab.sensors import Camera, CameraCfg, MultiMeshRayCaster, MultiMeshRayCasterCfg, RayCaster, RayCasterCfg
 import matplotlib.pyplot as plt
 import wandb
 from mpl_toolkits.mplot3d import Axes3D
 from .vae_residual_batch import VAE
+from .autoencoder_3d import AE3D
 import inspect
 from tqdm import tqdm
 import cv2
-
+import omni.usd
+from pxr import UsdGeom
 
 wandb.login()
 
 project = "uav_navigation"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-LOCAL_MAPS_SAVE_DIR = "/workspace/environment/uav_navigation/outputs/local_maps"
+LOCAL_MAPS_SAVE_DIR = "/workspace/environment/uav_navigation/outputs/local_maps_uav_navigation"  # where to save local maps; set to None to disable
 LOCAL_MAP_SAVE_EVERY = 1000   # steps between saves; set to 0 to disable
 LOCAL_NZ = 8                  # local map depth  (z axis)
 LOCAL_NY = 16                 # local map height (y axis)
@@ -65,14 +64,14 @@ ONLINE_OCC_VIZ_EVERY = 500    # steps between online-OCC sanity plots; 0 to disa
 
 
 class PolicyNet(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, input_dim=13, output_dim=4, hidden_dim=256):
         super().__init__()
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(13, 256),
+            torch.nn.Linear(input_dim, hidden_dim),
             torch.nn.ELU(),
-            torch.nn.Linear(256, 256),
+            torch.nn.Linear(hidden_dim, hidden_dim),
             torch.nn.ELU(),
-            torch.nn.Linear(256, 4),
+            torch.nn.Linear(hidden_dim, output_dim),
         )
     def forward(self, x):
         return self.net(x)
@@ -89,6 +88,25 @@ class vae_config:
     interpolation_mode = "nearest"
     return_sampled_latent = False
 
+class ae3d_config:
+    """
+    Mirror of the architectural hyperparams used to train the 3D AE.
+    Values MUST match the wandb config of run 8ivrdugy, otherwise the
+    state_dict will not load.
+    """
+    use_ae3d = True
+    latent_dim = 192                
+    model_file = (
+        "/workspace/vae_container/Vae/runs/8ivrdugy/daily-sweep-1/"
+        "checkpoints/ae3d_best_20260525_145127.pt"
+    )
+    latent_dim         = 192
+    num_conv_layers    = 6
+    num_deconv_layers  = 5
+    use_residual       = True
+    residual_every     = 2
+    use_skip           = True
+    svs_max            = 1e-8  
 class CollisionImage:
     def __init__(self):
         self.CX = 240.0
@@ -473,22 +491,45 @@ class VAEImageEncoder:
 
         return points_body, cam_pos_body
     
-
 class autoencoder_3d:
     """
-    Builds and maintains the per-env online 3D occupancy map and the
-    Spatial Visit Score (SVS) map used as input to the 3D encoder.
+    Wraps the trained 3D AE (OCC + SVS local maps → latent).
 
-    Holds a reference to the owning UavNavigationEnv so it can read the
-    robot state, camera data and config; it owns the map tensors itself.
+    Mirrors VAEImageEncoder in shape: same preprocess/encode/get_latent_dim
+    methods, so wiring into _get_observations is symmetric.
     """
 
-    def __init__(self, env: "UavNavigationEnv"):
+    def __init__(self, config, device="cuda:0"):
+        self.config = config
+        self.device = device
+
+        self.model = AE3D(
+            input_dim         = 2,
+            latent_dim        = config.latent_dim,
+            with_logits       = True,
+            inference_mode    = True,
+            num_conv_layers   = config.num_conv_layers,
+            use_residual      = config.use_residual,
+            residual_every    = config.residual_every,
+            num_deconv_layers = config.num_deconv_layers,
+            use_skip          = config.use_skip,
+        ).to(device)
+
+        print(f"[AE3DEncoder] Loading weights from {config.model_file}")
+        state_dict = torch.load(config.model_file, map_location=device)
+        # Strip a possible "module." prefix from DataParallel-trained checkpoints.
+        clean = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        missing, unexpected = self.model.load_state_dict(clean, strict=False)
+        print(f"[AE3DEncoder] Missing keys:    {missing}")
+        print(f"[AE3DEncoder] Unexpected keys: {unexpected}")
+        core = [k for k in missing if "conv" in k or "dense" in k]
+        if core:
+            raise RuntimeError(f"3D AE state_dict mismatch on core layers: {core}")
+        self.model.eval()
+
         self.env = env
         device = env.device
 
-        # ── Per-env online occupancy map ──────────────────────────────────
-        # Stored at LOCAL_CELL_SIZE; values: 0=UNKNOWN, 1=FREE, 2=OCCUPIED.
         self.occ_cell_size = float(env.cfg.occ_cell_size)
         self.occ_origin = torch.tensor(
             [env.x_min, env.y_min, env.z_min],
@@ -499,18 +540,20 @@ class autoencoder_3d:
         self.NZ = int(math.ceil((env.z_max - env.z_min) / self.occ_cell_size))
         self.occ_map_dims = (self.NZ, self.NY, self.NX)
 
+        # ── Persistent per-env buffers, populated ONLINE from sensors ──────
+        # global_occ_map: any cell that has ever received a LiDAR hit is 1.
+        # global_visit_counts: cell counter incremented at the drone's pose.
+        # Both wiped on _reset_idx.
         self.global_occ_map = torch.zeros(
             (env.num_envs, self.NZ, self.NY, self.NX),
             dtype=torch.uint8, device=device,
         )
-
-        # ── Visit counts at the same resolution as the OCC ─────────────────
         self.global_visit_counts = torch.zeros(
             (env.num_envs, self.NZ, self.NY, self.NX),
             dtype=torch.float32, device=device,
         )
 
-        # ── Local map shape — output stays (LOCAL_NZ, LOCAL_NY, LOCAL_NX) ──
+        # ── Local map shape ────────────────────────────────────────────────
         self.local_nz = LOCAL_NZ
         self.local_ny = LOCAL_NY
         self.local_nx = LOCAL_NX
@@ -518,83 +561,221 @@ class autoencoder_3d:
         self.local_hy = LOCAL_NY // 2
         self.local_hx = LOCAL_NX // 2
 
-    # ── SECTION 1.5: Online OCC update from depth camera (raycast) ────────────
-    def _update_occ_from_depth(self):
+    def preprocess(self, combined: torch.Tensor) -> torch.Tensor:
         """
-        Vectorized raycast update of the per-env online occupancy map.
+        combined: (N, 2, NZ, NY, NX), channel 0 = OCC, channel 1 = SVS.
+        Replicates LocalMap3DDataset.__getitem__ normalisation:
+          - OCC clipped to [0, 1]
+          - SVS clipped to >= 0, divided by svs_max, clipped to [0, 1].
+        """
+        out = combined.clone().float()
+        out[:, 0] = torch.clamp(out[:, 0], 0.0, 1.0)
+        out[:, 1] = torch.clamp(out[:, 1], 0.0, None)
+        if self.config.svs_max > 0:
+            out[:, 1] = out[:, 1] / self.config.svs_max
+        out[:, 1] = torch.clamp(out[:, 1], 0.0, 1.0)
+        return out
 
-        For every (subsampled) depth pixel:
-          1. Sample T points uniformly along the ray from the camera origin
-             to the world-frame depth endpoint.
-          2. Write FREE (1) at every in-bounds sample voxel.
-          3. Overwrite OCCUPIED (2) at the endpoint voxel iff the ray returned
-             a real hit (depth strictly below the far clipping plane).
+    def encode(self, combined: torch.Tensor) -> torch.Tensor:
+        """
+        combined: (N, 2, NZ, NY, NX).
+        Returns: (N, latent_dim) — deterministic mean, no sampling (inference_mode).
+        """
+        with torch.no_grad():
+            x = self.preprocess(combined)
+            out = self.model.encode(x)
+            if isinstance(out, tuple):
+                # VAE3D.encode returns (z_sampled, mean, log_var)
+                _, mean, _ = out
+                return mean
+            return out  # plain AE: encode() may return the latent directly
+
+    def decode(self, latent: torch.Tensor) -> torch.Tensor:
+        """Optional: reconstruct (N, 2, NZ, NY, NX) for debug viz."""
+        with torch.no_grad():
+            return torch.sigmoid(self.model.decode(latent))
+
+    def get_latent_dim(self) -> int:
+        return self.config.latent_dim
+
+    # ── Build local OCC: body-frame crop of the persistent global_occ_map ─────
+    def _build_local_occ_map(self, env_id: int) -> torch.Tensor:
+        """
+        Binary local OCC in YAW-aligned body frame, cropped from the
+        persistent global_occ_map (populated by _update_visit_counts from
+        every LiDAR frame). The drone is at the centre, +x forward,
+        +y left, +z world-up.
         """
         env = self.env
-        sub = int(env.cfg.occ_ray_subsample)
-        T = int(env.cfg.occ_samples_per_ray)
-
-        # ── Depth: (N, H, W, 1) → subsampled (N, h, w) ────────────────────────
-        depth_full = env.camera.data.output["distance_to_camera"]
-        max_range = float(env.cfg.camera.spawn.clipping_range[1])
-        depth = depth_full[:, ::sub, ::sub, 0]
-        depth = torch.nan_to_num(depth, nan=max_range, posinf=max_range, neginf=max_range)
-        depth = torch.clamp(depth, 0.0, max_range)
-        N, h, w = depth.shape
-
-        # Rays whose endpoint clipped at the far plane → "no return" (FREE only).
-        is_hit = depth < (max_range - 1e-3)
-
-        # ── Unproject to camera frame ─────────────────────────────────────────
-        K = env.camera.data.intrinsic_matrices               # (N, 3, 3)
-        fx = K[:, 0, 0]; fy = K[:, 1, 1]
-        cx = K[:, 0, 2]; cy = K[:, 1, 2]
-
-        # Pixel coords are expressed in the ORIGINAL (un-subsampled) image so
-        # the intrinsics remain consistent.
-        vs = (torch.arange(0, h, device=env.device) * sub).float()
-        us = (torch.arange(0, w, device=env.device) * sub).float()
-        grid_v, grid_u = torch.meshgrid(vs, us, indexing="ij")  # (h, w)
-        grid_v = grid_v.unsqueeze(0).expand(N, -1, -1)          # (N, h, w)
-        grid_u = grid_u.unsqueeze(0).expand(N, -1, -1)
-
-        Xc = depth * (grid_u - cx[:, None, None]) / fx[:, None, None]
-        Yc = depth * (grid_v - cy[:, None, None]) / fy[:, None, None]
-        Zc = depth
-        points_cam = torch.stack([Xc, Yc, Zc], dim=-1).reshape(N, -1, 3)  # (N, h*w, 3)
-
-        # ── Rotate to world frame ─────────────────────────────────────────────
-        cam_pos_w = env.camera.data.pos_w            # (N, 3)
-        cam_quat_w = env.camera.data.quat_w_world    # (N, 4), w-first
-        quat_exp = cam_quat_w.unsqueeze(1).expand(-1, points_cam.shape[1], -1)
-        points_world = quat_apply(quat_exp, points_cam) + cam_pos_w.unsqueeze(1)  # (N, h*w, 3)
-
-        # ── Sample T points along each ray ────────────────────────────────────
-        t = torch.linspace(0.0, 1.0, T, device=env.device)
-        origin = cam_pos_w[:, None, None, :]          # (N, 1, 1, 3)
-        endpoint = points_world[:, :, None, :]        # (N, h*w, 1, 3)
-        samples = origin + t[None, None, :, None] * (endpoint - origin)  # (N, h*w, T, 3)
-
-        # ── Voxelize ──────────────────────────────────────────────────────────
         cell = self.occ_cell_size
-        ix = ((samples[..., 0] - self.occ_origin[0]) / cell).long()
-        iy = ((samples[..., 1] - self.occ_origin[1]) / cell).long()
-        iz = ((samples[..., 2] - self.occ_origin[2]) / cell).long()
+        NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
         NZ, NY, NX = self.occ_map_dims
+
+        # Body-frame cell centres
+        xs = (torch.arange(NXL, device=env.device).float() - self.local_hx + 0.5) * cell
+        ys = (torch.arange(NYL, device=env.device).float() - self.local_hy + 0.5) * cell
+        zs = (torch.arange(NZL, device=env.device).float() - self.local_hz + 0.5) * cell
+        grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
+        pos_body = torch.stack([grid_x, grid_y, grid_z], dim=-1)
+        flat_body = pos_body.reshape(-1, 3)
+
+        # Body → world (yaw + drone pos), then world → warehouse-local
+        drone_pos_w = env._robot.data.root_pos_w[env_id]
+        drone_quat_w = env._robot.data.root_quat_w[env_id]
+        yaw_quat = math_utils.yaw_quat(drone_quat_w.unsqueeze(0)).squeeze(0)
+        yaw_exp = yaw_quat.unsqueeze(0).expand(flat_body.shape[0], -1)
+        flat_world = quat_apply(yaw_exp, flat_body) + drone_pos_w
+        env_origin_xy = env._terrain.env_origins[env_id, :2]
+        flat_world[:, :2] -= env_origin_xy
+
+        # Warehouse-local position → global voxel index
+        ix = ((flat_world[:, 0] - self.occ_origin[0]) / cell).long()
+        iy = ((flat_world[:, 1] - self.occ_origin[1]) / cell).long()
+        iz = ((flat_world[:, 2] - self.occ_origin[2]) / cell).long()
         in_bounds = (
             (ix >= 0) & (ix < NX) &
             (iy >= 0) & (iy < NY) &
             (iz >= 0) & (iz < NZ)
-        )  # (N, h*w, T)
+        )
 
-        # ── Write FREE (1) for every in-bounds sample ─────────────────────────
-        env_idx = torch.arange(N, device=env.device).view(N, 1, 1).expand(-1, h * w, T)
-        flat_e = env_idx[in_bounds]
-        flat_iz = iz[in_bounds]
-        flat_iy = iy[in_bounds]
-        flat_ix = ix[in_bounds]
-        self.global_occ_map[flat_e, flat_iz, flat_iy, flat_ix] = 1
+        local_flat = torch.zeros((flat_world.shape[0],), dtype=torch.float32, device=env.device)
+        if in_bounds.any():
+            local_flat[in_bounds] = self.global_occ_map[
+                env_id, iz[in_bounds], iy[in_bounds], ix[in_bounds]
+            ].float()
+        return local_flat.reshape(NZL, NYL, NXL)
 
+
+    # ── SECTION 2: Build local SVS map in BODY frame ──────────────────────────
+    def _build_local_svs_map(
+        self, env_id: int, local_occ: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """
+        Local SVS, shape (local_nz, local_ny, local_nx), in YAW-aligned body
+        frame. The world-frame global_visit_counts grid is inverse-warped
+        into the body box: for each body cell we compute its world position,
+        find the corresponding world voxel, and read the count there.
+        """
+        env = self.env
+        cell = self.occ_cell_size
+        NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
+        NZ, NY, NX = self.occ_map_dims
+
+        # ── Body-frame cell centres (z, y, x order matches output layout) ─
+        xs = (torch.arange(NXL, device=env.device).float() - self.local_hx + 0.5) * cell
+        ys = (torch.arange(NYL, device=env.device).float() - self.local_hy + 0.5) * cell
+        zs = (torch.arange(NZL, device=env.device).float() - self.local_hz + 0.5) * cell
+        grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
+        pos_body = torch.stack([grid_x, grid_y, grid_z], dim=-1)         # (NZL, NYL, NXL, 3)
+        flat_body = pos_body.reshape(-1, 3)                              # (M, 3)
+
+        # ── Body → world (apply drone yaw, then translate to drone pos) ───
+        drone_pos_w = env._robot.data.root_pos_w[env_id]                 # (3,)
+        drone_quat_w = env._robot.data.root_quat_w[env_id]               # (4,)
+        yaw_quat = math_utils.yaw_quat(drone_quat_w.unsqueeze(0)).squeeze(0)
+        yaw_exp = yaw_quat.unsqueeze(0).expand(flat_body.shape[0], -1)
+        env_origin_xy = env._terrain.env_origins[env_id, :2]
+        flat_world = quat_apply(yaw_exp, flat_body) + drone_pos_w   # current line
+        flat_world[:, :2] -= env_origin_xy                           # add this
+
+        # ── World position → global voxel index ───────────────────────────
+        ix = ((flat_world[:, 0] - self.occ_origin[0]) / cell).long()
+        iy = ((flat_world[:, 1] - self.occ_origin[1]) / cell).long()
+        iz = ((flat_world[:, 2] - self.occ_origin[2]) / cell).long()
+        in_bounds = (
+            (ix >= 0) & (ix < NX) &
+            (iy >= 0) & (iy < NY) &
+            (iz >= 0) & (iz < NZ)
+        )
+
+        counts_flat = torch.zeros((flat_world.shape[0],), dtype=torch.float32, device=env.device)
+        counts_flat[in_bounds] = self.global_visit_counts[
+            env_id, iz[in_bounds], iy[in_bounds], ix[in_bounds]
+        ]
+        counts = counts_flat.reshape(NZL, NYL, NXL)
+
+        # ── SVS = Shannon entropy of normalised visit distribution ────────
+        Nt = counts.sum()
+        svs = torch.zeros_like(counts)
+        if Nt > 0:
+            p = counts / Nt
+            svs = torch.where(p > 0, -p * torch.log(p), svs)
+            if local_occ is None:
+                local_occ = self._build_local_occ_map(env_id)
+            svs[local_occ > 0.5] = 0.0
+        return svs
+
+    # ── SECTION 4: Stack the two maps as separate channels ────────────────────
+    def _build_local_combined_map(self, env_id: int) -> torch.Tensor:
+        """Returns (2, 8, 16, 16): channel 0 = OCC, channel 1 = SVS."""
+        local_occ = self._build_local_occ_map(env_id)
+        local_svs = self._build_local_svs_map(env_id, local_occ=local_occ)
+        return torch.stack([local_occ, local_svs], dim=0)
+
+    # ── Update both buffers from per-step sensor data ─────────────────────────
+    def _update_visit_counts(self, env_ids: torch.Tensor | None = None):
+        """
+        Every step:
+          (a) Increment global_visit_counts at the drone's warehouse-local voxel.
+          (b) Mark global_occ_map = 1 at every voxel that received a finite
+              LiDAR hit this frame (warehouse-local coords).
+        Both buffers are persistent across steps and reset only in _reset_idx.
+        """
+        env = self.env
+        if env_ids is None:
+            env_ids = torch.arange(env.num_envs, device=env.device)
+
+        env_origins = env.scene.env_origins[env_ids]                # (E, 3)
+        NZ, NY, NX = self.occ_map_dims
+        cell = self.occ_cell_size
+
+        # ─── (a) Visit counts at the drone's voxel ────────────────────────
+        pos_w = env._robot.data.root_pos_w[env_ids]                 # (E, 3)
+        local_pos = pos_w.clone()
+        local_pos[:, :2] -= env_origins[:, :2]                      # warehouse-local
+
+        iz = ((local_pos[:, 2] - self.occ_origin[2]) / cell).long()
+        iy = ((local_pos[:, 1] - self.occ_origin[1]) / cell).long()
+        ix = ((local_pos[:, 0] - self.occ_origin[0]) / cell).long()
+        valid = (iz >= 0) & (iz < NZ) & (iy >= 0) & (iy < NY) & (ix >= 0) & (ix < NX)
+        if valid.any():
+            ve = env_ids[valid]
+            self.global_visit_counts[ve, iz[valid], iy[valid], ix[valid]] += 1.0
+
+        # ─── (b) OCC from LiDAR hits, accumulated across steps ────────────
+        # ray_hits_w shape: (num_envs, B, 3) in world frame; inf for no-return.
+        hits_w = env.ray_caster.data.ray_hits_w[env_ids]            # (E, B, 3)
+        hits_valid = torch.isfinite(hits_w).all(dim=-1)             # (E, B)
+
+        # World → warehouse-local for the x/y axes (z is unchanged because
+        # env_origins is only offset in the horizontal plane).
+        hits_local = hits_w.clone()
+        hits_local[..., :2] -= env_origins.unsqueeze(1)[..., :2]    # broadcast (E, 1, 2)
+
+        hix = ((hits_local[..., 0] - self.occ_origin[0]) / cell).long()
+        hiy = ((hits_local[..., 1] - self.occ_origin[1]) / cell).long()
+        hiz = ((hits_local[..., 2] - self.occ_origin[2]) / cell).long()
+        hits_in_bounds = (
+            (hix >= 0) & (hix < NX) &
+            (hiy >= 0) & (hiy < NY) &
+            (hiz >= 0) & (hiz < NZ)
+        )
+        write = hits_valid & hits_in_bounds                         # (E, B)
+
+        if write.any():
+            B = hits_w.shape[1]
+            env_idx_grid = env_ids.view(-1, 1).expand(-1, B)        # (E, B)
+            self.global_occ_map[
+                env_idx_grid[write], hiz[write], hiy[write], hix[write]
+            ] = 1
+
+    def _save_local_maps(self, env_ids: torch.Tensor):                                                                                                                   
+        """Save combined (2, 8, 16, 16) maps for alive envs to disk."""
+        step = self.common_step_counter                                                                                                                                  
+        for env_id in env_ids.tolist():
+            combined = self._build_local_combined_map(env_id)                                                                                                            
+            path = os.path.join(LOCAL_MAPS_SAVE_DIR, f"env{env_id}_step{step}.npy")                                                                                      
+            np.save(path, combined.cpu().numpy()) 
 
 
 class UavNavigationEnv(DirectRLEnv):
@@ -648,9 +829,6 @@ class UavNavigationEnv(DirectRLEnv):
         self.distance_to_bounds_y = torch.zeros(self.num_envs, device=self.device)
         self.final_distance_to_goal_b = torch.zeros(self.num_envs, device=self.device)
 
-        #self.curriculum_level = 0
-        #self.arena_size = torch.ones(self.num_envs, device=self.device) * 4.0
-
         self.accum_deaths = 0.0
         self.accum_timeouts = 0.0
         self.accum_reward = 0.0
@@ -696,7 +874,6 @@ class UavNavigationEnv(DirectRLEnv):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
         self.camera = Camera(self.cfg.camera)
-        #self.ray_caster = RaycasterSensorSceneCfg
         self.scene.sensors["camera"] = self.camera
         self.scene.clone_environments(copy_from_source=False)
 
@@ -705,8 +882,26 @@ class UavNavigationEnv(DirectRLEnv):
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+
+        # ── Enumerate warehouse mesh prims for the OCC raycaster ──────────
+        # Same enumeration pattern as vae_container/Vae/occupancymap3d_fw.py,
+        # rooted at /World/ground (where TerrainImporterCfg places the
+        # full_warehouse USD).
+
+        stage = omni.usd.get_context().get_stage()
+        mesh_paths = []
+        for prim in stage.Traverse():
+            path = prim.GetPath().pathString
+            if path.startswith("/World/ground") and prim.IsA(UsdGeom.Mesh):
+                mesh_paths.append(path)
+        print(f"[RayCaster] {len(mesh_paths)} warehouse meshes registered for occupancy raycaster")
+        self.cfg.ray_caster.mesh_prim_paths = mesh_paths
+        self.ray_caster = MultiMeshRayCaster(self.cfg.ray_caster)
+        self.scene.sensors["ray_caster"] = self.ray_caster
+
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._prev_actions = self._actions.clone()
@@ -736,9 +931,6 @@ class UavNavigationEnv(DirectRLEnv):
         )
 
     def _get_observations(self) -> dict:
-        # ── Refresh online OCC from the depth camera BEFORE anything else ─────
-        self.autoencoder3D._update_occ_from_depth()
-
         # ── Update visit counts at every step (all envs) ──────────────────────
         self.autoencoder3D._update_visit_counts()
 
@@ -781,27 +973,27 @@ class UavNavigationEnv(DirectRLEnv):
         # encode
         latent = self.vae_encoder.encode(collision)  # (N, latent_dim)
 
-        if self.common_step_counter % 20 == 0:
-            depth_vis = depth[0, :, :, 0] / self.max_depth
-            depth_np = depth_vis.detach().cpu().numpy()
-            plt.imshow(depth_np, cmap='plasma', vmin=0, vmax=1)
-            plt.colorbar(label='Depth (m)')
-            plt.title('Raw Depth')
-            plt.savefig('depth_check.png')
-            plt.close()
+        # if self.common_step_counter % 20 == 0:
+        #     depth_vis = depth[0, :, :, 0] / self.max_depth
+        #     depth_np = depth_vis.detach().cpu().numpy()
+        #     plt.imshow(depth_np, cmap='plasma', vmin=0, vmax=1)
+        #     plt.colorbar(label='Depth (m)')
+        #     plt.title('Raw Depth')
+        #     plt.savefig('depth_check.png')
+        #     plt.close()
 
-            collision_np = collision[0, 0].detach().cpu().numpy()
-            plt.imshow(collision_np, cmap='plasma', vmin=0, vmax=1)
-            plt.title('Collision Image')
-            plt.savefig('collision_check.png')
-            plt.close()
+        #     collision_np = collision[0, 0].detach().cpu().numpy()
+        #     plt.imshow(collision_np, cmap='plasma', vmin=0, vmax=1)
+        #     plt.title('Collision Image')
+        #     plt.savefig('collision_check.png')
+        #     plt.close()
 
-            recon = self.vae_encoder.decode(latent)
-            recon_np = recon[0, 0].detach().cpu().numpy()
-            plt.imshow(recon_np, cmap='plasma', vmin=0, vmax=1)
-            plt.title('Reconstruction')
-            plt.savefig('recon_check.png')
-            plt.close()
+        #     recon = self.vae_encoder.decode(latent)
+        #     recon_np = recon[0, 0].detach().cpu().numpy()
+        #     plt.imshow(recon_np, cmap='plasma', vmin=0, vmax=1)
+        #     plt.title('Reconstruction')
+        #     plt.savefig('recon_check.png')
+        #     plt.close()
 
         obs = torch.cat(
             [
@@ -898,8 +1090,7 @@ class UavNavigationEnv(DirectRLEnv):
         self._prev_actions[env_ids] = 0.0
         self._actions[env_ids] = 0.0
         self.alive_steps[env_ids] = 0.0
-        # ── Reset per-env online OCC for terminated envs ──────────────────────
-        self.autoencoder3D.global_occ_map[env_ids] = 0
+
 
         n = len(env_ids)
         self._desired_pos_w[env_ids, 0] = torch.zeros_like(
@@ -931,6 +1122,9 @@ class UavNavigationEnv(DirectRLEnv):
 
         # ── Reset visit counts for terminated envs ────────────────────────────
         self.autoencoder3D.global_visit_counts[env_ids] = 0.0
+        # ── Reset OCC buffer for terminated envs ──────────────────────────────
+        self.autoencoder3D.global_occ_map[env_ids] = 0
+
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         pass
