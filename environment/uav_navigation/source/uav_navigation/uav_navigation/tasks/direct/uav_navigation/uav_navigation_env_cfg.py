@@ -51,12 +51,11 @@ class UavNavigationEnvWindow(BaseEnvWindow):
 @configclass
 class UavNavigationEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 200.0
+    episode_length_s = 20.0
     decimation= 10
     decimation_low_level = 2
     action_space = 4
-    observation_space = 719 # (15 + 512 * 2 + 192 * 2) 
-    # perchè nel codice le funzione dense restituivano latent_dim * 2
+    observation_space = 719 
     state_space = 0
     debug_vis = True
 
@@ -93,20 +92,6 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
 
-    # terrain = TerrainImporterCfg(
-    #     prim_path="/World/ground",
-    #     terrain_type="plane",
-    #     collision_group=-1,
-    #     physics_material=sim_utils.RigidBodyMaterialCfg(
-    #         friction_combine_mode="multiply",
-    #         restitution_combine_mode="multiply",
-    #         static_friction=1.0,
-    #         dynamic_friction=1.0,
-    #         restitution=0.0,
-    #     ),
-    #     debug_vis=False,
-    # )
-
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=1, env_spacing=2.5, replicate_physics=True
@@ -123,6 +108,18 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     occ_cell_size: float = 0.25
     occ_samples_per_ray: int = 40   # voxels sampled along each LiDAR ray for FREE marking
 
+    # ── Distance-to-obstacles (smooth safety margin reward) ──────────────
+    safety_radius: float = 0.5                           # metres, ~saturates the reward at this distance
+   
+    # ── Exploration (PDF-style v_t = γ·exp(-δ·N_t)) ──────────────────────
+    exploration_gamma: float = 1.0
+    exploration_delta: float = 0.01
+
+    # ── Collision termination ─────────────────────────────────────────────
+    collision_distance: float = 0.3   # metres (PDF value); drone "dies" when
+                                       # any OCC voxel is within this distance.
+
+  
     # Drone-mounted 360x90 LiDAR raycaster — feeds the OCC map.
     # Mesh prim paths are injected at runtime in UavNavigationEnv._setup_scene
     # once the warehouse USD is loaded.
@@ -162,23 +159,12 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    # height_scanner = RayCasterCfg(
-    #     prim_path="/World/envs/env_.*/Robot/body",
-    #     update_period=1 / 60,
-    #     offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 5.0)),
-    #     ray_alignment="yaw",
-    #     #pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
-    #     debug_vis=True,
-    #     mesh_prim_paths=["/World/ground"],
-    #     pattern_cfg=patterns.LidarPatternCfg(
-    #         channels=100, vertical_fov_range=[-90, 90], horizontal_fov_range=[-90, 90], horizontal_res=1.0
-    #     ),
-    # )
-
     # reward scales
-    lin_vel_reward_scale = -1.0
-    ang_vel_reward_scale = -1.0
-    distance_to_goal_reward_scale = 100.0
+    lin_vel_reward_scale = -0.1
+    ang_vel_reward_scale = -0.1
+    distance_to_goal_reward_scale = 50.0
     rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1
-    death_reward_scale = 0.0
+    death_reward_scale = -2000.0
+    distance_to_obstacles_reward_scale = 2.0
+    exploration_reward_scale = 1.0

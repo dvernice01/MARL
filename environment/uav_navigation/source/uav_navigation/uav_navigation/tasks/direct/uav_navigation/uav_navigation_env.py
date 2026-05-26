@@ -107,6 +107,7 @@ class ae3d_config:
     residual_every     = 2
     use_skip           = True
     svs_max            = 0.243812
+
 class CollisionImage:
     def __init__(self):
         self.CX = 240.0
@@ -621,7 +622,9 @@ class autoencoder_3d:
         return local_flat.reshape(NZL, NYL, NXL)
 
     # ── Body-frame local SVS (inverse-warp of global_visit_counts) ────────────
-    def _build_local_svs_map(self, env_id: int, local_occ=None) -> torch.Tensor:
+    def _build_local_svs_map(
+        self, env_id: int, local_occ=None, return_counts: bool = False
+    ) -> torch.Tensor:
         env = self.env
         cell = self.occ_cell_size
         NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
@@ -666,12 +669,48 @@ class autoencoder_3d:
             if local_occ is None:
                 local_occ = self._build_local_occ_map(env_id)
             svs[local_occ > 0.5] = 0.0
+        if return_counts:
+            return svs, counts
         return svs
 
-    def _build_local_combined_map(self, env_id: int) -> torch.Tensor:
+    def build_local_features(self, env_id: int) -> dict:
+        """
+        One-pass per-env build: returns everything needed by both the
+        observation tensor and the reward function. Avoids redoing the
+        body-frame voxelisation in separate reward helpers.
+
+        Returned dict:
+          'combined':         (2, NZL, NYL, NXL)  channel 0 = OCC, channel 1 = SVS
+          'local_occ':        (NZL, NYL, NXL)     binary
+          'dist_to_obstacle': scalar tensor       metres, min distance to OCC voxel
+                                                  (= local-box half-extent if empty)
+          'Nt':               scalar tensor       sum of visit counts in the local box
+        """
         local_occ = self._build_local_occ_map(env_id)
-        local_svs = self._build_local_svs_map(env_id, local_occ=local_occ)
-        return torch.stack([local_occ, local_svs], dim=0)
+        local_svs, counts = self._build_local_svs_map(
+            env_id, local_occ=local_occ, return_counts=True
+        )
+
+        cell = self.occ_cell_size
+        max_dist = float(self.local_hx) * cell
+
+        # Min metric distance from drone (body origin) to any OCC voxel.
+        occupied = torch.nonzero(local_occ > 0.5, as_tuple=False)   # (M, 3)  (iz, iy, ix)
+        if occupied.numel() > 0:
+            bz = (occupied[:, 0].float() - self.local_hz + 0.5) * cell
+            by = (occupied[:, 1].float() - self.local_hy + 0.5) * cell
+            bx = (occupied[:, 2].float() - self.local_hx + 0.5) * cell
+            dist_to_obstacle = torch.sqrt(bx * bx + by * by + bz * bz).min()
+        else:
+            dist_to_obstacle = torch.tensor(max_dist, device=self.env.device)
+
+        return {
+            "combined":         torch.stack([local_occ, local_svs], dim=0),
+            "local_occ":        local_occ,
+            "dist_to_obstacle": dist_to_obstacle,
+            "Nt":               counts.sum(),
+        }
+
 
     # ── Per-step buffer updates from sensors ──────────────────────────────────
     def _update_visit_counts(self, env_ids: torch.Tensor | None = None):
@@ -777,7 +816,10 @@ class UavNavigationEnv(DirectRLEnv):
                 "ang_vel",
                 "distance_to_goal",
                 "life",
+                "distance_to_obstacles",
+                "exploration",
                 "died",
+                "died_collision",
                 "time_out",
                 "action_reg_diff",
                 "final_distance_to_goal",
@@ -802,9 +844,22 @@ class UavNavigationEnv(DirectRLEnv):
 
         self.policy_network = self._load_policy_network()
         self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
+        # ── Cached perception features used by _get_rewards / _get_dones ─────
+        # Default to a large value so step 0 doesn't false-positive a collision.
+        _local_half_extent = (LOCAL_NX // 2) * LOCAL_CELL_SIZE
+        self._dist_to_obstacle_cache = torch.full(
+            (self.num_envs,), _local_half_extent, device=self.device,
+        )
+        self._Nt_cache = torch.zeros(self.num_envs, device=self.device)
 
         self.vae_encoder = VAEImageEncoder(vae_config, device=self.device)
         self.max_depth = 10.0  
+        self._min_depth_cache = torch.full(
+            (self.num_envs,),
+            float(self.cfg.camera.spawn.clipping_range[1]),
+            device=self.device,
+        )
+
         # 3D occupancy / SVS map builder — owns global_occ_map & global_visit_counts
         self.autoencoder3D = autoencoder_3d(self)
 
@@ -901,7 +956,10 @@ class UavNavigationEnv(DirectRLEnv):
         self.autoencoder3D._update_visit_counts()
 
         # ── Save combined maps periodically ───────────────────────────────────
-        origins = self.scene.env_origins                                                                                                                                     
+        origins = self.scene.env_origins    
+        self.distance_to_bounds_x = ((self._robot.data.root_pos_w[:, 0] - origins[:, 0] > self.x_min)) & ((self.x_max > self._robot.data.root_pos_w[:, 0] - origins[:, 0]))
+        self.distance_to_bounds_y = ((self._robot.data.root_pos_w[:, 1] - origins[:, 1] > self.y_min)) & ((self.y_max > self._robot.data.root_pos_w[:, 1] - origins[:, 1]))
+                                                                                                                                  
         pos_w   = self._robot.data.root_pos_w
         local_x = pos_w[:, 0] - origins[:, 0]                                                                                                                                
         local_y = pos_w[:, 1] - origins[:, 1]                                                                                                                                
@@ -930,6 +988,13 @@ class UavNavigationEnv(DirectRLEnv):
         )
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
         depth = self.camera.data.output["distance_to_camera"]  # (N, H, W, 1)
+        # ── Min depth in the camera FOV — used by distance-to-obstacles reward ─
+        max_range = float(self.cfg.camera.spawn.clipping_range[1])
+        depth_clean = torch.nan_to_num(depth, nan=max_range, posinf=max_range, neginf=max_range)
+        depth_clean = torch.clamp(depth_clean, 0.0, max_range)
+        # (N, H, W, 1) → (N, H*W) → min over pixels → (N,)
+        self._min_depth_cache = depth_clean.flatten(1).min(dim=1).values
+
 
         # preprocess (VERY IMPORTANT)
         collision = self.vae_encoder.preprocess(depth)
@@ -939,12 +1004,78 @@ class UavNavigationEnv(DirectRLEnv):
             # ── 2D VAE latent (depth → collision image → latent) ─────────────────
         latent_2d = self.vae_encoder.encode(collision)            # (N, 512)
 
-        # ── 3D AE latent (per-env body-frame (OCC, SVS) → latent) ────────────
-        combined = torch.stack([
-            self.autoencoder3D._build_local_combined_map(eid)
-            for eid in range(self.num_envs)
-        ], dim=0)                                                 # (N, 2, NZ, NY, NX)
-        latent_3d = self.autoencoder3D.encode(combined)           # (N, latent_dim_3d)
+        # ── 3D AE: one-pass build of OCC, SVS, and the reward features ───────
+        feats = [self.autoencoder3D.build_local_features(eid)
+                 for eid in range(self.num_envs)]
+        combined = torch.stack([f["combined"] for f in feats], dim=0)      # (N, 2, NZ, NY, NX)
+        self._dist_to_obstacle_cache = torch.stack([f["dist_to_obstacle"] for f in feats])  # (N,)
+        self._Nt_cache               = torch.stack([f["Nt"] for f in feats])                # (N,)
+        latent_3d = self.autoencoder3D.encode(combined)                    # (N, latent_dim_3d)
+
+        if self.common_step_counter % 30 == 0:
+            # ── 3D AE: target (preprocessed) vs reconstructed (env 0) ──────────
+            target = self.autoencoder3D.preprocess(combined[0:1])      # (1, 2, NZ, NY, NX)
+            recon  = self.autoencoder3D.decode(latent_3d[0:1])         # (1, 2, NZ, NY, NX), sigmoid-ed
+            target_np = target[0].detach().cpu().numpy()
+            recon_np  = recon[0].detach().cpu().numpy()
+
+            fig = plt.figure(figsize=(14, 8))
+            fig.suptitle(f"Step {self.common_step_counter} — env 0 local maps", fontsize=12)
+
+            for row, (data, label) in enumerate([(target_np, "Target"), (recon_np, "Recon")]):
+                occ = data[0]
+                svs = data[1]
+
+                ax = fig.add_subplot(2, 2, row * 2 + 1, projection="3d")
+                iz, iy, ix = np.where(occ > 0.5)
+                if len(iz):
+                    ax.scatter(ix, iy, iz, s=20, c="red", alpha=0.4, marker="s")
+                ax.set_xlim(0, occ.shape[2] - 1)
+                ax.set_ylim(0, occ.shape[1] - 1)
+                ax.set_zlim(0, occ.shape[0] - 1)
+                ax.set_title(f"{label} OCC ({len(iz)} voxels)")
+                ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
+
+                ax2 = fig.add_subplot(2, 2, row * 2 + 2, projection="3d")
+                iz2, iy2, ix2 = np.where(svs > 0.15)
+                if len(iz2):
+                    vals = svs[iz2, iy2, ix2]
+                    sc = ax2.scatter(ix2, iy2, iz2, s=20, c=vals,
+                                     cmap="viridis", alpha=0.5, marker="s",
+                                     vmin=0.0, vmax=1.0)
+                    fig.colorbar(sc, ax=ax2, shrink=0.5)
+                ax2.set_xlim(0, svs.shape[2] - 1)
+                ax2.set_ylim(0, svs.shape[1] - 1)
+                ax2.set_zlim(0, svs.shape[0] - 1)
+                ax2.set_title(f"{label} SVS")
+                ax2.set_xlabel("body x"); ax2.set_ylabel("body y"); ax2.set_zlabel("body z")
+
+            plt.tight_layout()
+            plt.savefig("local_maps_check.png", dpi=120, bbox_inches="tight")
+            plt.close()
+
+        
+        if self.common_step_counter % 30 == 0:
+            # ── 2D VAE: depth → collision → recon (env 0) in one figure ────────
+            depth_np      = (depth[0, :, :, 0] / self.max_depth).detach().cpu().numpy()
+            collision_np  = collision[0, 0].detach().cpu().numpy()
+            recon_2d      = self.vae_encoder.decode(latent_2d[0:1])
+            recon_np      = recon_2d[0, 0].detach().cpu().numpy()
+
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            fig.suptitle(f"Step {self.common_step_counter} — env 0 2D VAE", fontsize=12)
+
+            titles = ["Depth (normalized)", "Collision (VAE input)", "Reconstruction"]
+            images = [depth_np, collision_np, recon_np]
+
+            for ax, img, title in zip(axes, images, titles):
+                im = ax.imshow(img, cmap="plasma", vmin=0, vmax=1)
+                ax.set_title(title)
+                ax.axis("off")
+
+            fig.colorbar(im, ax=axes, shrink=0.7, fraction=0.02, pad=0.02)
+            plt.savefig("vae2d_check.png", dpi=120, bbox_inches="tight")
+            plt.close()
 
         obs = torch.cat(
             [
@@ -964,10 +1095,7 @@ class UavNavigationEnv(DirectRLEnv):
 
 
     def _get_rewards(self) -> torch.Tensor:
-        # print("occ_origin:", self.occ_origin)
-        # print("env_origin[0]:", self._terrain.env_origins[0])
-        # print("env_origin[1]:", self._terrain.env_origins[1])
-        # print("env_origin[2]:", self._terrain.env_origins[2])
+       
         origins = self.scene.env_origins
         lin_vel_sum = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel_sum = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
@@ -976,30 +1104,34 @@ class UavNavigationEnv(DirectRLEnv):
         self._episode_sums["final_distance_to_goal"] += self.final_distance_to_goal * self.step_dt
         distance_to_goal_mapped = 1 - torch.tanh(self.final_distance_to_goal / 0.8)
 
-        #pos_local = self._robot.data.root_pos_w - origins[:, 0]  # (num_envs, 3)
-        self.distance_to_bounds_x = ((self._robot.data.root_pos_w[:, 0] - origins[:, 0] > self.x_min)) & ((self.x_max > self._robot.data.root_pos_w[:, 0] - origins[:, 0]))
-        self.distance_to_bounds_y = ((self._robot.data.root_pos_w[:, 1] - origins[:, 1] > self.y_min)) & ((self.y_max > self._robot.data.root_pos_w[:, 1] - origins[:, 1]))
-        # square_side = self.arena_size
-        # relative_distance_to_bounds_x = torch.abs((origins[:, 0]) - self._robot.data.root_pos_w[:, 0])
-        # relative_distance_to_bounds_y = torch.abs((origins[:, 1]) - self._robot.data.root_pos_w[:, 1])
-        # self.distance_to_bounds_x = (square_side / 2) - relative_distance_to_bounds_x
-        # self.distance_to_bounds_y = (square_side / 2) - relative_distance_to_bounds_y
-
         action_diff = self._actions - self._prev_actions
         action_reg_diff = torch.norm(action_diff, p=2, dim=-1)
         action_reg_diff = 1 - torch.tanh(action_reg_diff / 0.8)
-
-        is_alive_bounds = torch.logical_and(self.distance_to_bounds_x, self.distance_to_bounds_y)
-        is_alive_height = torch.logical_and(self._robot.data.root_pos_w[:, 2] > self.z_min, self._robot.data.root_pos_w[:, 2] < self.z_max)
-        is_alive = torch.logical_and(is_alive_bounds, is_alive_height)
+        
+        is_alive_bounds    = torch.logical_and(self.distance_to_bounds_x, self.distance_to_bounds_y)
+        is_alive_height    = torch.logical_and(
+            self._robot.data.root_pos_w[:, 2] > self.z_min,
+            self._robot.data.root_pos_w[:, 2] < self.z_max,
+        )
+        is_alive_collision = self._dist_to_obstacle_cache > self.cfg.collision_distance
+        is_alive = is_alive_bounds & is_alive_height & is_alive_collision
         life = torch.where(is_alive, self.cfg.alive_reward_scale, self.cfg.death_reward_scale)
+        
+        # ── Distance to obstacles ─────────────────────────────────────────
+        dist_to_obs_reward = torch.tanh(self._min_depth_cache / self.cfg.safety_radius)
+
+        exploration_reward = self.cfg.exploration_gamma * torch.exp(
+            -self.cfg.exploration_delta * self._Nt_cache
+        )
 
         rewards = {
-            "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
-            "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
-            "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
-            "action_reg_diff": action_reg_diff * self.cfg.rew_scale_action_reg * self.step_dt,
-            "life": life * self.step_dt,
+            "lin_vel":                  lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
+            "ang_vel":                  ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
+            "distance_to_goal":         distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "action_reg_diff":          action_reg_diff * self.cfg.rew_scale_action_reg * self.step_dt,
+            "life":                     life * self.step_dt,
+            "distance_to_obstacles":    dist_to_obs_reward * self.cfg.distance_to_obstacles_reward_scale * self.step_dt,
+            "exploration":              exploration_reward * self.cfg.exploration_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         for key, value in rewards.items():
@@ -1008,27 +1140,39 @@ class UavNavigationEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        died = (self._robot.data.root_pos_w[:, 2] < self.z_min) | \
-               (self._robot.data.root_pos_w[:, 2] > self.z_max) | \
-               ( ~self.distance_to_bounds_x.bool()) | \
-               ( ~self.distance_to_bounds_y.bool())
+
+        out_of_bounds = (
+            (self._robot.data.root_pos_w[:, 2] < self.z_min) |
+            (self._robot.data.root_pos_w[:, 2] > self.z_max) |
+            (~self.distance_to_bounds_x.bool()) |
+            (~self.distance_to_bounds_y.bool())
+        )
+        collided = self._dist_to_obstacle_cache < self.cfg.collision_distance
+
+        died = out_of_bounds | collided
         return died, time_out
+
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
 
-        num_deaths = torch.count_nonzero(self.reset_terminated[env_ids]).item()
-        num_timeouts = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+        num_deaths           = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+        num_timeouts         = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+        num_deaths_collision = int((
+            self.reset_terminated[env_ids] &
+            (self._dist_to_obstacle_cache[env_ids] < self.cfg.collision_distance)
+        ).sum().item())
 
         self._episode_sums["died"] += num_deaths
+        self._episode_sums["died_collision"] += num_deaths_collision
         self._episode_sums["time_out"] += num_timeouts
 
         self.extras["log"] = dict()
         extras = dict()
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
-            if key in ["died", "time_out"]:
+            if key in ["died", "died_collision", "time_out"]:
                 extras["Episode_Termination/" + key] = episodic_sum_avg / self.max_episode_length_s
             elif key in ["final_distance_to_goal"]:
                 extras["Episode_Info/" + key] = episodic_sum_avg / self.max_episode_length_s
