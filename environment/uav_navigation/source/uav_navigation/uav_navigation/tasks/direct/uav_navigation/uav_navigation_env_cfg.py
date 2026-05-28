@@ -51,7 +51,7 @@ class UavNavigationEnvWindow(BaseEnvWindow):
 @configclass
 class UavNavigationEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 20.0
+    episode_length_s = 100.0
     decimation= 10
     decimation_low_level = 2
     action_space = 4
@@ -94,7 +94,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1, env_spacing=2.5, replicate_physics=True
+        num_envs=8, env_spacing=2.5, replicate_physics=True
     )
 
     # robot
@@ -160,11 +160,11 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     )
 
     # reward scales
-    lin_vel_reward_scale = -0.1
-    ang_vel_reward_scale = -0.1
+    lin_vel_reward_scale = 0.1
+    ang_vel_reward_scale = 0.1
     distance_to_goal_reward_scale = 50.0
     rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1
     death_reward_scale = -2000.0
-    distance_to_obstacles_reward_scale = 2.0
-    exploration_reward_scale = 1.0
+    distance_to_obstacles_reward_scale = 5.0
+    exploration_reward_scale = 5.0

@@ -13,7 +13,7 @@ from skrl.resources.preprocessors.torch import RunningStandardScaler
 class HierarchicalGRUPolicy(GaussianMixin, Model):
     def __init__(self, observation_space, action_space, device, clip_actions=False,
                  clip_log_std=True, min_log_std=-20, max_log_std=2, initial_log_std=0,
-                 num_envs=1, num_layers=1, hidden_size=256, hidden_size_gru=512, sequence_length=8):
+                 num_envs=1, num_layers=1, hidden_size=2048, hidden_size_gru=512, sequence_length=8):
         Model.__init__(self, observation_space, action_space, device)
         GaussianMixin.__init__(self, clip_actions, clip_log_std, min_log_std, max_log_std)
 
@@ -27,22 +27,24 @@ class HierarchicalGRUPolicy(GaussianMixin, Model):
         self.net = nn.Sequential(
             nn.Linear(self.num_observations, hidden_size),
             nn.ELU(),
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ELU(),
+            nn.Linear(hidden_size // 2, hidden_size // 4),
             nn.ELU(),
         )
 
         # GRU: takes MLP output (hidden_size) → hidden_size_gru
         self.gru = nn.GRU(
-            input_size=hidden_size,      # MLP output feeds into GRU
+            input_size=hidden_size // 4,      # MLP output feeds into GRU
             hidden_size=hidden_size_gru, # GRU internal size
             num_layers=num_layers,
             batch_first=True,
         )
 
         # Head: hidden_size_gru → actions
-        self.fc1 = nn.Linear(hidden_size_gru, 64)
-        self.fc2 = nn.Linear(64, 32)
-        self.fc3 = nn.Linear(32, self.num_actions)
+        self.fc1 = nn.Linear(hidden_size_gru, hidden_size_gru // 2)
+        self.fc2 = nn.Linear(hidden_size_gru // 2, hidden_size_gru // 8)
+        self.fc3 = nn.Linear(hidden_size_gru // 8, self.num_actions)
 
         self.log_std_parameter = nn.Parameter(
             torch.full((self.num_actions,), initial_log_std, dtype=torch.float32)
@@ -66,8 +68,8 @@ class HierarchicalGRUPolicy(GaussianMixin, Model):
             hidden_states = hidden_states[:, :, 0, :].contiguous()  # (num_layers, N, hidden_size_gru)
 
             N, L, obs_dim   = rnn_input.shape
-            features_flat   = self.net(rnn_input.view(N * L, obs_dim))  # (N*L, hidden_size)
-            features        = features_flat.view(N, L, self.hidden_size) # (N, L, hidden_size)
+            features_flat   = self.net(rnn_input.view(N * L, obs_dim))  # (N*L, hidden_size // 4)
+            features        = features_flat.view(N, L, self.hidden_size // 4)  # (N, L, hidden_size // 4)
 
             if terminated is not None and torch.any(terminated):
                 rnn_outputs = []
@@ -101,7 +103,7 @@ class HierarchicalGRUPolicy(GaussianMixin, Model):
 
 class HierarchicalGRUValue(DeterministicMixin, Model):
     def __init__(self, observation_space, action_space, device, clip_actions=False,
-                 num_envs=1, num_layers=1, hidden_size=256, hidden_size_gru=512, sequence_length=8):
+                 num_envs=1, num_layers=1, hidden_size=2048, hidden_size_gru=512, sequence_length=8):
 
         Model.__init__(self, observation_space, action_space, device)
         DeterministicMixin.__init__(self, clip_actions)
@@ -116,22 +118,24 @@ class HierarchicalGRUValue(DeterministicMixin, Model):
         self.net = nn.Sequential(
             nn.Linear(self.num_observations, hidden_size),
             nn.ELU(),
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ELU(),
+            nn.Linear(hidden_size // 2, hidden_size // 4),
             nn.ELU(),
         )
 
         # GRU: takes MLP output (hidden_size) → hidden_size_gru
         self.gru = nn.GRU(
-            input_size=hidden_size,      # MLP output feeds into GRU
+            input_size=hidden_size // 4,      # MLP output feeds into GRU
             hidden_size=hidden_size_gru, # GRU internal size
             num_layers=num_layers,
             batch_first=True,
         )
 
         # Head: hidden_size_gru → 1 (value)
-        self.fc1 = nn.Linear(hidden_size_gru, 64)
-        self.fc2 = nn.Linear(64, 32)
-        self.fc3 = nn.Linear(32, 1)
+        self.fc1 = nn.Linear(hidden_size_gru, hidden_size_gru // 2)
+        self.fc2 = nn.Linear(hidden_size_gru // 2, hidden_size_gru // 8)
+        self.fc3 = nn.Linear(hidden_size_gru // 8, 1)
 
     def get_specification(self):
         return {"rnn": {"sequence_length": self.sequence_length,
@@ -151,8 +155,8 @@ class HierarchicalGRUValue(DeterministicMixin, Model):
             hidden_states = hidden_states[:, :, 0, :].contiguous()  # (num_layers, N, hidden_size_gru)
 
             N, L, obs_dim = rnn_input.shape
-            features_flat = self.net(rnn_input.view(N * L, obs_dim))  # (N*L, hidden_size)
-            features      = features_flat.view(N, L, self.hidden_size) # (N, L, hidden_size)
+            features_flat = self.net(rnn_input.view(N * L, obs_dim))  # (N*L, hidden_size // 4)
+            features      = features_flat.view(N, L, self.hidden_size // 4)  # (N, L, hidden_size // 4)
 
             if terminated is not None and torch.any(terminated):
                 rnn_outputs = []
@@ -236,8 +240,8 @@ def get_ppo_agent(env, device, agent_cfg=None, log_dir="logs/defaults"):
         return default
 
     # Read all sweep parameters with fallbacks to your defaults
-    hidden_size        = get("hidden_size", 256)
-    hidden_size_gru    = get("hidden_size_gru", 128)
+    hidden_size        = get("hidden_size", 2048)
+    hidden_size_gru    = get("hidden_size_gru", 512)
     rollouts           = get("rollouts", 64)
     learning_rate      = get("learning_rate", 5e-4)
     learning_epochs    = get("learning_epochs", 15)

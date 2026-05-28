@@ -199,13 +199,20 @@ def main(env_cfg, agent_cfg: dict):
 
     # ── 6. Trainer ────────────────────────────────────────────────────
     rollouts = sweep_cfg.get("rollouts", 64)
-    default_timesteps = 150000
+    default_timesteps = 1500000
     trainer_cfg = {
         "timesteps": args_cli.max_iterations * rollouts if args_cli.max_iterations else default_timesteps,
         "headless": True,
         "close_environment_at_exit": False,
         "environment_info": "log",
     }
+    import torch
+    print(f"PyTorch alloc:    {torch.cuda.memory_allocated()/1e9:.2f} GB")
+    print(f"PyTorch reserved: {torch.cuda.memory_reserved()/1e9:.2f} GB")
+    import subprocess
+    out = subprocess.run(["nvidia-smi","--query-gpu=memory.used","--format=csv,noheader,nounits"], capture_output=True, text=True).stdout
+    print(f"GPU total used:   {int(out.strip())/1024:.2f} GB")
+
     trainer = SequentialTrainer(cfg=trainer_cfg, env=env, agents=agent)
     trainer.train()
     env.close()
