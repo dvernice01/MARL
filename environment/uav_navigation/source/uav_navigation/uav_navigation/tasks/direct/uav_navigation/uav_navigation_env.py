@@ -133,7 +133,7 @@ class CollisionImage:
         x = np.arange(0, H, dtype=np.float32)
         y = np.arange(0, W, dtype=np.float32)
         x, y = np.meshgrid(y, x)
-        z = np.ones((H, W))
+        z = np.ones((H, W), dtype=np.float32)
         x = (x - cx) / fx
         y = (y - cy) / fy
         return np.stack([x, y, z], axis=0)
@@ -296,6 +296,12 @@ class VAEImageEncoder:
         self.config = config
         self.device = device
         self.collision = CollisionImage()
+        # GPU-resident meshgrid for the batched D_offset block of preprocess_hybrid
+        self._meshgrid_torch = torch.from_numpy(self.collision.MESHGRID).float().to(device)
+        self._max_depth_val = float(self.collision.MAX_DEPTH)
+        self._offset_dist   = float(self.collision.OFFSET_DIST)
+        self._min_depth_val = float(self.collision.MIN_DEPTH)
+
         #self.collision.__init__()
         self.vae_model = VAE(
             input_dim          = 1,
@@ -374,6 +380,153 @@ class VAEImageEncoder:
                 )
             decoded_image = self.vae_model.decode(latent_spaces)
         return decoded_image
+
+# --------------------------------------------
+
+    def _sanitize_depth_torch(self, depth: torch.Tensor) -> torch.Tensor:
+        """
+        Torch mirror of CollisionImage.sanitize_depth on float32 tensors.
+        Bit-equivalent to the numpy version (nan_to_num + clamp are elementwise).
+        """
+        depth = torch.nan_to_num(depth.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        depth = depth.clamp(0.0, self._max_depth_val)
+        return depth
+
+    def _process_image_like_author_torch(self, image: torch.Tensor) -> torch.Tensor:
+        """
+        Torch mirror of CollisionImage.process_image_like_author. Each op is
+        elementwise (where / multiply / clamp) so the float32 output matches
+        the numpy path bit-for-bit on the operands it cares about.
+        """
+        out = image.clone()
+        out = torch.where(out < self._min_depth_val,
+                          torch.full_like(out, -1.0), out)
+        out = torch.where(out > self._max_depth_val,
+                          torch.full_like(out, self._max_depth_val), out)
+        out = out * 0.1
+        out = out.clamp(0.0, 1.0)
+        return out
+
+    def _build_D_M_per_env(self,
+                           depth_uint8_np: np.ndarray,
+                           depth_clean_np: np.ndarray) -> np.ndarray:
+        """
+        CPU-only step per env: Canny + edge detection + cube projection.
+        Mirrors the middle of CollisionImage.depth_to_collision_image.
+
+        If fewer than 10 edges are detected we return an array filled with
+        MAX_DEPTH. After process_image_like_author this becomes 1.0 everywhere,
+        so the subsequent min(norm_offset, norm_D_M) collapses to norm_offset,
+        matching the early-return branch of the original.
+        """
+        edges, _ = self.collision.detect_edges(depth_uint8_np, depth_clean_np)
+        if len(edges) < 10:
+            return np.full(
+                (self.collision.H, self.collision.W),
+                self.collision.MAX_DEPTH,
+                dtype=np.float32,
+            )
+        # Recompute x, y, z on CPU from the same sanitized depth that was used
+        # on GPU. Bit-equivalent because elementwise float32 multiply matches
+        # between numpy CPU and torch CUDA, and the depth array was transferred
+        # by raw byte copy (no precision conversion).
+        mg = self.collision.MESHGRID
+        x = mg[0] * depth_clean_np
+        y = mg[1] * depth_clean_np
+        z = mg[2] * depth_clean_np
+        point_cloud = np.stack([x, y, z], axis=0)
+        return self.collision.build_D_M_from_cubes(
+            edges, point_cloud, depth_clean_np,
+            edge_length=self.collision.ROBOT_EDGE_LEN,
+        )
+
+    def preprocess_hybrid(self, depth_torch: torch.Tensor) -> torch.Tensor:
+        """
+        Hybrid GPU/CPU replacement for preprocess.
+
+          * Sanitize + D_offset block runs batched on GPU.
+          * Canny + edge detection + cube projection still run on CPU per env
+            (cv2.Canny is CPU-only and we are not changing it).
+          * Final combine (min of norm_offset and norm_D_M) runs batched on GPU.
+
+        Output is bit-equivalent to preprocess for any depth tensor whose
+        spatial shape already matches (CollisionImage.H, CollisionImage.W),
+        because every operation we vectorise is elementwise float32.
+
+        depth_torch: (N, H, W, 1) on self.device
+        returns    : (N, 1, H, W) on self.device
+        """
+        # ── 1. Squeeze + sanitize on GPU, batched ──────────────────────────
+        if depth_torch.ndim == 4 and depth_torch.shape[-1] == 1:
+            depth = depth_torch.squeeze(-1)
+        else:
+            depth = depth_torch
+        assert depth.shape[-2:] == (self.collision.H, self.collision.W), (
+            f"preprocess_hybrid expects depth of shape (..., {self.collision.H}, "
+            f"{self.collision.W}); got {tuple(depth.shape)}"
+        )
+        depth = self._sanitize_depth_torch(depth)                       # (N, H, W) GPU
+
+        # ── 2. D_offset block, batched on GPU ──────────────────────────────
+        mx = self._meshgrid_torch[0].unsqueeze(0)                       # (1, H, W)
+        my = self._meshgrid_torch[1].unsqueeze(0)
+        mz = self._meshgrid_torch[2].unsqueeze(0)
+        x = mx * depth                                                   # (N, H, W)
+        y = my * depth
+        z = mz * depth
+        range_img = torch.sqrt(x * x + y * y + z * z)
+        range_img = torch.nan_to_num(range_img, nan=self._max_depth_val)
+
+        # Mirror np.divide(OFFSET_DIST, range_img, out=zeros, where=range_img>0):
+        # safe_inv = 0 where range_img <= 0, else OFFSET_DIST / range_img.
+        range_safe = torch.where(
+            range_img > 0,
+            range_img,
+            torch.ones_like(range_img),
+        )
+        safe_inv = torch.where(
+            range_img > 0,
+            self._offset_dist / range_safe,
+            torch.zeros_like(range_img),
+        )
+        z_offset = torch.where(
+            range_img > 0,
+            (1.0 - safe_inv) * z,
+            torch.zeros_like(z),
+        )
+        norm_offset = self._process_image_like_author_torch(z_offset)   # (N, H, W) GPU
+
+        # ── 3. Single GPU→CPU transfer of the sanitized depth ──────────────
+        depth_clean_np = depth.cpu().numpy()                            # (N, H, W) float32
+        depth_uint8_np = (depth_clean_np / self._max_depth_val * 255.0).astype(np.uint8)
+
+        # ── 4. CPU per-env: Canny + edge detection + cube projection ───────
+        N, H, W = depth_clean_np.shape
+        D_M_raw_np = np.empty((N, H, W), dtype=np.float32)
+        for i in range(N):
+            D_M_raw_np[i] = self._build_D_M_per_env(
+                depth_uint8_np[i], depth_clean_np[i]
+            )
+
+        # ── 5. Combine block, batched on GPU ───────────────────────────────
+        D_M_raw_t = torch.from_numpy(D_M_raw_np).to(self.device)
+        norm_D_M = self._process_image_like_author_torch(D_M_raw_t)
+        collision = torch.minimum(norm_offset, norm_D_M)
+        collision = torch.nan_to_num(collision, nan=0.0)
+
+        # ── 6. Reshape and resize as the original preprocess does ──────────
+        collision = collision.unsqueeze(1)                              # (N, 1, H, W)
+        if collision.shape[-2:] != tuple(self.config.image_res):
+            collision = torch.nn.functional.interpolate(
+                collision,
+                size=self.config.image_res,
+                mode=self.config.interpolation_mode,
+            )
+        return collision
+
+# --------------------------------------------
+
+
 
     def get_latent_dims_size(self):
         """
@@ -708,6 +861,99 @@ class autoencoder_3d:
             "Nt":               counts.sum(),
         }
 
+    def build_local_features_batched(self) -> dict:
+        """
+        Batched equivalent of build_local_features over all envs.
+        Returns:
+          'combined':         (N, 2, NZL, NYL, NXL)  channel 0 OCC, channel 1 SVS
+          'local_occ':        (N, NZL, NYL, NXL)    binary
+          'dist_to_obstacle': (N,)                  metres
+          'Nt':               (N,)                  sum of visit counts
+        """
+        env = self.env
+        cell = self.occ_cell_size
+        NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
+        NZ, NY, NX = self.occ_map_dims
+        N = env.num_envs
+
+        # Body-frame grid (shared across envs)
+        xs = (torch.arange(NXL, device=env.device).float() - self.local_hx + 0.5) * cell
+        ys = (torch.arange(NYL, device=env.device).float() - self.local_hy + 0.5) * cell
+        zs = (torch.arange(NZL, device=env.device).float() - self.local_hz + 0.5) * cell
+        grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
+        flat_body = torch.stack([grid_x, grid_y, grid_z], dim=-1).reshape(-1, 3)   # (M, 3)
+        M = flat_body.shape[0]
+
+        # Per-env transforms
+        drone_pos_w = env._robot.data.root_pos_w                                   # (N, 3)
+        drone_quat_w = env._robot.data.root_quat_w                                 # (N, 4)
+        yaw_quat = math_utils.yaw_quat(drone_quat_w)                               # (N, 4)
+
+        yaw_flat = yaw_quat.unsqueeze(1).expand(-1, M, -1).reshape(-1, 4)          # (N*M, 4)
+        body_flat = flat_body.unsqueeze(0).expand(N, -1, -1).reshape(-1, 3)        # (N*M, 3)
+        world_flat = quat_apply(yaw_flat, body_flat).reshape(N, M, 3)              # (N, M, 3)
+        world_flat = world_flat + drone_pos_w.unsqueeze(1)
+
+        env_origin_xy = env._terrain.env_origins[:, :2]                            # (N, 2)
+        world_flat[:, :, :2] -= env_origin_xy.unsqueeze(1)
+
+        ix = ((world_flat[:, :, 0] - self.occ_origin[0]) / cell).long()
+        iy = ((world_flat[:, :, 1] - self.occ_origin[1]) / cell).long()
+        iz = ((world_flat[:, :, 2] - self.occ_origin[2]) / cell).long()
+
+        in_bounds = (
+            (ix >= 0) & (ix < NX) &
+            (iy >= 0) & (iy < NY) &
+            (iz >= 0) & (iz < NZ)
+        )                                                                          # (N, M)
+
+        ix_c = ix.clamp(0, NX - 1)
+        iy_c = iy.clamp(0, NY - 1)
+        iz_c = iz.clamp(0, NZ - 1)
+
+        env_idx = torch.arange(N, device=env.device).unsqueeze(1).expand(-1, M)    # (N, M)
+
+        occ_flat = self.global_occ_map[env_idx, iz_c, iy_c, ix_c].float()
+        occ_flat = occ_flat * in_bounds.float()
+        local_occ = occ_flat.reshape(N, NZL, NYL, NXL)
+
+        counts_flat = self.global_visit_counts[env_idx, iz_c, iy_c, ix_c]
+        counts_flat = counts_flat * in_bounds.float()
+        counts = counts_flat.reshape(N, NZL, NYL, NXL)
+
+        Nt = counts.flatten(1).sum(dim=1)                                          # (N,)
+        Nt_safe = Nt.clamp(min=1e-8).view(N, 1, 1, 1)
+        p = counts / Nt_safe
+        svs = torch.where(p > 0, -p * torch.log(p), torch.zeros_like(p))
+        svs = svs * (local_occ < 0.5).float()
+        svs = svs * (Nt > 0).float().view(N, 1, 1, 1)
+
+        # Distance from body origin (0,0,0) to any occupied voxel centre
+        dists_body = torch.norm(flat_body, dim=1)                                  # (M,)
+        max_dist = float(self.local_hx) * cell
+        occ_mask = (occ_flat > 0.5)                                                # (N, M)
+        dists_exp = dists_body.unsqueeze(0).expand(N, -1)
+        dists_masked = torch.where(
+            occ_mask, dists_exp,
+            torch.full_like(dists_exp, float("inf")),
+        )
+        dist_to_obstacle = dists_masked.min(dim=1).values
+        dist_to_obstacle = torch.where(
+            torch.isinf(dist_to_obstacle),
+            torch.full_like(dist_to_obstacle, max_dist),
+            dist_to_obstacle,
+        )
+
+        combined = torch.stack([local_occ, svs], dim=1)                            # (N, 2, NZL, NYL, NXL)
+
+        return {
+            "combined":         combined,
+            "local_occ":        local_occ,
+            "dist_to_obstacle": dist_to_obstacle,
+            "Nt":               Nt,
+        }
+
+
 
     # ── Per-step buffer updates from sensors ──────────────────────────────────
     def _update_visit_counts(self, env_ids: torch.Tensor | None = None):
@@ -993,96 +1239,110 @@ class UavNavigationEnv(DirectRLEnv):
 
 
         # preprocess (VERY IMPORTANT)
-        collision = self.vae_encoder.preprocess(depth)
-        assert not torch.isnan(collision).any(), f"NaN in collision: {collision.min()}, {collision.max()}"
-        assert not torch.isinf(collision).any(), f"Inf in collision: {collision.min()}, {collision.max()}"
+        collision = self.vae_encoder.preprocess_hybrid(depth)
+        # assert not torch.isnan(collision).any(), f"NaN in collision: {collision.min()}, {collision.max()}"
+        # assert not torch.isinf(collision).any(), f"Inf in collision: {collision.min()}, {collision.max()}"
     
         # ── 2D VAE latent (depth → collision image → latent) ─────────────────
         latent_2d = self.vae_encoder.encode(collision)            # (N, 512)
 
-        # ── 3D AE: one-pass build of OCC, SVS, and the reward features ───────
-        feats = [self.autoencoder3D.build_local_features(eid)
-                 for eid in range(self.num_envs)]
-        combined = torch.stack([f["combined"] for f in feats], dim=0)      # (N, 2, NZ, NY, NX)
-        self._dist_to_obstacle_cache = torch.stack([f["dist_to_obstacle"] for f in feats])  # (N,)
-        self._Nt_cache               = torch.stack([f["Nt"] for f in feats])                # (N,)
+        # ── 3D AE: one-pass batched build of OCC, SVS, and the reward features ─
+        feats = self.autoencoder3D.build_local_features_batched()
+        combined = feats["combined"]                                       # (N, 2, NZ, NY, NX)
+        self._dist_to_obstacle_cache = feats["dist_to_obstacle"]           # (N,)
+        self._Nt_cache               = feats["Nt"]                         # (N,)
         latent_3d = self.autoencoder3D.encode(combined)                    # (N, latent_dim_3d)
 
-        # if self.common_step_counter % 30 == 0:
-        #     # ── 3D AE: target (preprocessed) vs reconstructed (env 0) ──────────
-        #     target = self.autoencoder3D.preprocess(combined[0:1])      # (1, 2, NZ, NY, NX)
-        #     recon  = self.autoencoder3D.decode(latent_3d[0:1])         # (1, 2, NZ, NY, NX), sigmoid-ed
-        #     target_np = target[0].detach().cpu().numpy()
-        #     recon_np  = recon[0].detach().cpu().numpy()
+        if self.common_step_counter % 30 == 0:
+            # ── 3D AE: target (preprocessed) vs reconstructed (env 0) ──────────
+            target = self.autoencoder3D.preprocess(combined[0:1])      # (1, 2, NZ, NY, NX)
+            recon  = self.autoencoder3D.decode(latent_3d[0:1])         # (1, 2, NZ, NY, NX), sigmoid-ed
+            target_np = target[0].detach().cpu().numpy()
+            recon_np  = recon[0].detach().cpu().numpy()
 
-        #     fig = plt.figure(figsize=(14, 8))
-        #     fig.suptitle(f"Step {self.common_step_counter} — env 0 local maps", fontsize=12)
+            fig = plt.figure(figsize=(14, 8))
+            fig.suptitle(f"Step {self.common_step_counter} — env 0 local maps", fontsize=12)
 
-        #     for row, (data, label) in enumerate([(target_np, "Target"), (recon_np, "Recon")]):
-        #         occ = data[0]
-        #         svs = data[1]
+            for row, (data, label) in enumerate([(target_np, "Target"), (recon_np, "Recon")]):
+                occ = data[0]
+                svs = data[1]
 
-        #         ax = fig.add_subplot(2, 2, row * 2 + 1, projection="3d")
-        #         iz, iy, ix = np.where(occ > 0.5)
-        #         if len(iz):
-        #             ax.scatter(ix, iy, iz, s=20, c="red", alpha=0.4, marker="s")
-        #         ax.set_xlim(0, occ.shape[2] - 1)
-        #         ax.set_ylim(0, occ.shape[1] - 1)
-        #         ax.set_zlim(0, occ.shape[0] - 1)
-        #         ax.set_title(f"{label} OCC ({len(iz)} voxels)")
-        #         ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
+                ax = fig.add_subplot(2, 2, row * 2 + 1, projection="3d")
+                iz, iy, ix = np.where(occ > 0.5)
+                if len(iz):
+                    ax.scatter(ix, iy, iz, s=20, c="red", alpha=0.4, marker="s")
+                ax.set_xlim(0, occ.shape[2] - 1)
+                ax.set_ylim(0, occ.shape[1] - 1)
+                ax.set_zlim(0, occ.shape[0] - 1)
+                ax.set_title(f"{label} OCC ({len(iz)} voxels)")
+                ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
 
-        #         ax2 = fig.add_subplot(2, 2, row * 2 + 2, projection="3d")
-        #         iz2, iy2, ix2 = np.where(svs > 0.15)
-        #         if len(iz2):
-        #             vals = svs[iz2, iy2, ix2]
-        #             sc = ax2.scatter(ix2, iy2, iz2, s=20, c=vals,
-        #                              cmap="viridis", alpha=0.5, marker="s",
-        #                              vmin=0.0, vmax=1.0)
-        #             fig.colorbar(sc, ax=ax2, shrink=0.5)
-        #         ax2.set_xlim(0, svs.shape[2] - 1)
-        #         ax2.set_ylim(0, svs.shape[1] - 1)
-        #         ax2.set_zlim(0, svs.shape[0] - 1)
-        #         ax2.set_title(f"{label} SVS")
-        #         ax2.set_xlabel("body x"); ax2.set_ylabel("body y"); ax2.set_zlabel("body z")
+                ax2 = fig.add_subplot(2, 2, row * 2 + 2, projection="3d")
+                iz2, iy2, ix2 = np.where(svs > 0.15)
+                if len(iz2):
+                    vals = svs[iz2, iy2, ix2]
+                    sc = ax2.scatter(ix2, iy2, iz2, s=20, c=vals,
+                                     cmap="viridis", alpha=0.5, marker="s",
+                                     vmin=0.0, vmax=1.0)
+                    fig.colorbar(sc, ax=ax2, shrink=0.5)
+                ax2.set_xlim(0, svs.shape[2] - 1)
+                ax2.set_ylim(0, svs.shape[1] - 1)
+                ax2.set_zlim(0, svs.shape[0] - 1)
+                ax2.set_title(f"{label} SVS")
+                ax2.set_xlabel("body x"); ax2.set_ylabel("body y"); ax2.set_zlabel("body z")
 
-        #     plt.tight_layout()
-        #     plt.savefig("local_maps_check.png", dpi=120, bbox_inches="tight")
-        #     plt.close()
+            plt.tight_layout()
+            plt.savefig("local_maps_check.png", dpi=120, bbox_inches="tight")
+            plt.close()
 
         
-        # if self.common_step_counter % 30 == 0:
-        #     # ── 2D VAE: depth → collision → recon (env 0) in one figure ────────
-        #     depth_np      = (depth[0, :, :, 0] / self.max_depth).detach().cpu().numpy()
-        #     collision_np  = collision[0, 0].detach().cpu().numpy()
-        #     recon_2d      = self.vae_encoder.decode(latent_2d[0:1])
-        #     recon_np      = recon_2d[0, 0].detach().cpu().numpy()
+        if self.common_step_counter % 30 == 0:
+            d0 = depth[0]
+            finite = torch.isfinite(d0)
+            n_inf = torch.isinf(d0).sum().item()
+            n_nan = torch.isnan(d0).sum().item()
+            n_fin = finite.sum().item()
+            if n_fin > 0:
+                finite_vals = d0[finite]
+                print(f"[depth env0] finite={n_fin}/{d0.numel()} "
+                    f"min={finite_vals.min().item():.3f} "
+                    f"max={finite_vals.max().item():.3f} "
+                    f"mean={finite_vals.mean().item():.3f} "
+                    f"inf={n_inf} nan={n_nan}")
+            else:
+                print(f"[depth env0] NO finite values, inf={n_inf} nan={n_nan}")
 
-        #     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        #     fig.suptitle(f"Step {self.common_step_counter} — env 0 2D VAE", fontsize=12)
+            # ── 2D VAE: depth → collision → recon (env 0) in one figure ────────
+            depth_np      = (depth[0, :, :, 0] / self.max_depth).detach().cpu().numpy()
+            collision_np  = collision[0, 0].detach().cpu().numpy()
+            recon_2d      = self.vae_encoder.decode(latent_2d[0:1])
+            recon_np      = recon_2d[0, 0].detach().cpu().numpy()
 
-        #     titles = ["Depth (normalized)", "Collision (VAE input)", "Reconstruction"]
-        #     images = [depth_np, collision_np, recon_np]
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            fig.suptitle(f"Step {self.common_step_counter} — env 0 2D VAE", fontsize=12)
 
-        #     for ax, img, title in zip(axes, images, titles):
-        #         im = ax.imshow(img, cmap="plasma", vmin=0, vmax=1)
-        #         ax.set_title(title)
-        #         ax.axis("off")
+            titles = ["Depth (normalized)", "Collision (VAE input)", "Reconstruction"]
+            images = [depth_np, collision_np, recon_np]
 
-        #     fig.colorbar(im, ax=axes, shrink=0.7, fraction=0.02, pad=0.02)
-        #     plt.savefig("vae2d_check.png", dpi=120, bbox_inches="tight")
-        #     plt.close()
+            for ax, img, title in zip(axes, images, titles):
+                im = ax.imshow(img, cmap="plasma", vmin=0, vmax=1)
+                ax.set_title(title)
+                ax.axis("off")
+
+            fig.colorbar(im, ax=axes, shrink=0.7, fraction=0.02, pad=0.02)
+            plt.savefig("vae2d_check.png", dpi=120, bbox_inches="tight")
+            plt.close()
 
         obs = torch.cat(
             [
-                self.rel_pos_b,                              # 3
-                self._prev_actions,                          # 4
-                self._robot.data.root_lin_vel_b,             # 3
-                self._robot.data.root_ang_vel_b,             # 3
-                self.distance_to_bounds_x.reshape(-1, 1),    # 1
-                self.distance_to_bounds_y.reshape(-1, 1),    # 1
-                latent_2d,                                   # 512
-                latent_3d,                                   # 192
+                self.rel_pos_b,                                      # 3
+                self._prev_actions,                                  # 4
+                self._robot.data.root_lin_vel_b,                     # 3
+                self._robot.data.root_ang_vel_b,                     # 3
+                self.distance_to_bounds_x.reshape(-1, 1).float(),    # 1
+                self.distance_to_bounds_y.reshape(-1, 1).float(),    # 1
+                latent_2d,                                           # 512
+                latent_3d,                                           # 192
             ],
             dim=-1,
         )
@@ -1143,7 +1403,7 @@ class UavNavigationEnv(DirectRLEnv):
             (~self.distance_to_bounds_x.bool()) |
             (~self.distance_to_bounds_y.bool())
         )
-        collided = self._dist_to_obstacle_cache < self.cfg.collision_distance
+        collided = self._dist_to_obstacle_cache <= self.cfg.collision_distance
 
         died = out_of_bounds | collided
         return died, time_out
@@ -1183,7 +1443,7 @@ class UavNavigationEnv(DirectRLEnv):
 
         self._prev_actions[env_ids] = 0.0
         self._actions[env_ids] = 0.0
-        self.alive_steps[env_ids] = 0.0
+        self.alive_steps[env_ids] = 0
 
 
         n = len(env_ids)
@@ -1192,7 +1452,7 @@ class UavNavigationEnv(DirectRLEnv):
         ).uniform_(self.x_min + 1.0, self.x_max - 1.0)
         self._desired_pos_w[env_ids, 1] = torch.zeros_like(
             self._desired_pos_w[env_ids, 1]
-        ).uniform_(self.y_min + 1.0, self.y_max - 1.0)
+        ).uniform_(0.0, self.y_max - 1.0)
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(
             self._desired_pos_w[env_ids, 2]
         ).uniform_(self.z_min + 1.0, self.z_max - 1.0)

@@ -94,7 +94,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=8, env_spacing=2.5, replicate_physics=True
+        num_envs=16, env_spacing=80.0, replicate_physics=True
     )
 
     # robot
@@ -125,15 +125,15 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     # once the warehouse USD is loaded.
     ray_caster: MultiMeshRayCasterCfg = MultiMeshRayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/body",
-        update_period=0.0,
+        update_period= 1.0 * decimation / 120,  # match LiDAR update rate (10 Hz)
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0)),
         ray_alignment="yaw",
         mesh_prim_paths=[],  # populated at runtime
         pattern_cfg=patterns.LidarPatternCfg(
-            channels=32,
+            channels=24,
             vertical_fov_range=(-45.0, 45.0),
             horizontal_fov_range=(-180.0, 180.0),
-            horizontal_res=1.0,
+            horizontal_res=2.0,
         ),
         debug_vis=False,
     )
@@ -141,7 +141,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
 
     camera = CameraCfg(
         prim_path="/World/envs/env_.*/Robot/body/front_cam",  # aggiungere o togliere /Robot/body prima di front_cam in base a se stai collezionando dati o facendo RL
-        update_period=0.1,
+        update_period=1.0 * decimation / 120,
         height=270,   # keep small for RL — 480x640 will crush perf at 4096 envs
         width=480,
         data_types=["distance_to_camera"],  # depth sensing
@@ -165,6 +165,6 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     distance_to_goal_reward_scale = 50.0
     rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1
-    death_reward_scale = -2000.0
+    death_reward_scale = -50.0
     distance_to_obstacles_reward_scale = 5.0
     exploration_reward_scale = 5.0
