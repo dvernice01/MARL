@@ -17,11 +17,11 @@ parameters:
   use_skip:           {value: true}
   occ_weight:         {value: 1.0}
   occ_pos_weight:     {value: 6}              # +1.8 IoU vs 12 in v2
-  svs_nonzero_weight: {value: 100} # 35            # beats 50 (50 smears)
+  svs_nonzero_weight: {values: [100, 120]} # 35            # beats 50 (50 smears)
   # ── swept ───────────────────────────────────────────────────
   latent_dim:         {value: 192}
-  svs_weight:         {value: 20.0} # 4
-  occ_dice_weight:    {value: 1.0}
-  svs_dice_weight:    {value: 3.0}
+  svs_weight:         {values: [20.0, 30.0]} # 4
+  occ_dice_weight:    {values: [0.5, 1.0, 3.0]}
+  svs_dice_weight:    {values: [1.0, 3.0, 5.0]}
 
 

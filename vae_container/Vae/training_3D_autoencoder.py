@@ -1,3 +1,10 @@
+
+# ----------------------------------------------
+# RUN ATTUALMENTE DA USARE PER YAW-ALIGNED -> 8ivrdugy (/home/studenti/dvernice/Marl_IsaacLab/vae_container/Vae/runs/8ivrdugy/daily-sweep-1/checkpoints/ae3d_best_20260525_145127.pt)
+# ----------------------------------------------
+
+
+
 import os
 import time
 import random
@@ -349,7 +356,7 @@ def main():
 
     # ── data ──────────────────────────────────────────────────────────────
     train_loader, val_loader, test_loader, svs_max = make_loaders(
-        data_dir="dataset_3d_collection",
+        data_dir="dataset_3d_collection_yaw_oriented",
         val_ratio=0.1,
         test_ratio=0.1,
         batch_size=cfg.batch_size,

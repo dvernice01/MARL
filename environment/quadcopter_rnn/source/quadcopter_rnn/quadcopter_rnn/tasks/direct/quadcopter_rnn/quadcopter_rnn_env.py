@@ -243,74 +243,130 @@ class QuadcopterRnnEnv(DirectRLEnv):
             self.global_visit_counts[ve, iz[valid], iy[valid], ix[valid]] += 1.0
 
 
-
-    # ── SECTION 2: Build local SVS map ────────────────────────────────────────
+    # ── SECTION 2: Build local SVS map in BODY frame ──────────────────────────
     def _build_local_svs_map(self, env_id: int) -> torch.Tensor:
-      pos_w = self._robot.data.root_pos_w[env_id]
-      local_pos = pos_w.clone()
-      local_pos[:2] -= self._terrain.env_origins[env_id, :2]
-      stride = self.local_stride
-      cz = int((local_pos[2] - self.occ_origin[2]) / self.occ_grid_size)
-      cy = int((local_pos[1] - self.occ_origin[1]) / self.occ_grid_size)
-      cx = int((local_pos[0] - self.occ_origin[0]) / self.occ_grid_size)
-                                                                 
-                                                                                                                                     
-      NZ, NY, NX = self.occ_map_dims                                                                                                 
-      ghz, ghy, ghx = self.local_hz * stride, self.local_hy * stride, self.local_hx * stride                                         
-      z0, z1 = cz - ghz, cz + ghz                                                                                                    
-      y0, y1 = cy - ghy, cy + ghy
-      x0, x1 = cx - ghx, cx + ghx                                                                                                    
-                  
-      buf = torch.zeros((z1 - z0, y1 - y0, x1 - x0), dtype=torch.float32, device=self.device)                                        
-      sz0, sz1 = max(z0, 0), min(z1, NZ)
-      sy0, sy1 = max(y0, 0), min(y1, NY)                                                                                             
-      sx0, sx1 = max(x0, 0), min(x1, NX)
-      if sz0 < sz1 and sy0 < sy1 and sx0 < sx1:                                                                                      
-          buf[sz0-z0:sz1-z0, sy0-y0:sy1-y0, sx0-x0:sx1-x0] = \
-              self.global_visit_counts[env_id, sz0:sz1, sy0:sy1, sx0:sx1]                                                            
-                                                                                                                                     
-      # sum-pool into coarse voxels                                                                                                  
-      coarse = F.avg_pool3d(buf.unsqueeze(0).unsqueeze(0), kernel_size=stride, stride=stride)                                        
-      coarse = coarse.squeeze() * (stride ** 3)  # (local_nz, local_ny, local_nx)                                                    
-                                                                                                                                     
-      Nt = coarse.sum()                                                                                                              
-      svs = torch.zeros_like(coarse)                                                                                                 
-      if Nt > 0:                                                                                                                     
-        p = coarse / Nt
-        svs = torch.where(p > 0, -p * torch.log(p), svs)
-        local_occ = self._build_local_occ_map(env_id)
-        svs[local_occ > 0.5] = 0.0
+        """
+        Local SVS in YAW-aligned body frame, Shannon entropy of the normalised
+        visit-count distribution inside the local box, with occupied voxels
+        zeroed out. Shape: (local_nz, local_ny, local_nx) = (8, 16, 16).
+        """
+        device = self.device
+        cell_fine = self.occ_grid_size
+        stride = self.local_stride
+
+        NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
+        NZF, NYF, NXF = NZL * stride, NYL * stride, NXL * stride
+        NZ, NY, NX = self.occ_map_dims
+
+        # ── Body-frame fine voxel centres ─────────────────────────────────
+        xs = (torch.arange(NXF, device=device).float() - NXF / 2.0 + 0.5) * cell_fine
+        ys = (torch.arange(NYF, device=device).float() - NYF / 2.0 + 0.5) * cell_fine
+        zs = (torch.arange(NZF, device=device).float() - NZF / 2.0 + 0.5) * cell_fine
+        grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
+        pos_body = torch.stack([grid_x, grid_y, grid_z], dim=-1)
+        flat_body = pos_body.reshape(-1, 3)
+
+        # ── Body → world (yaw + drone pos) ─────────────────────────────────
+        drone_pos_w = self._robot.data.root_pos_w[env_id]
+        drone_quat_w = self._robot.data.root_quat_w[env_id]
+        yaw_quat = math_utils.yaw_quat(drone_quat_w.unsqueeze(0)).squeeze(0)
+        yaw_exp = yaw_quat.unsqueeze(0).expand(flat_body.shape[0], -1)
+        flat_world = math_utils.quat_apply(yaw_exp, flat_body) + drone_pos_w
+
+        # ── World → warehouse-local ────────────────────────────────────────
+        env_origin_xy = self._terrain.env_origins[env_id, :2]
+        flat_world[:, :2] -= env_origin_xy
+
+        # ── Warehouse-local position → fine voxel index ────────────────────
+        ix = ((flat_world[:, 0] - self.occ_origin[0]) / cell_fine).long()
+        iy = ((flat_world[:, 1] - self.occ_origin[1]) / cell_fine).long()
+        iz = ((flat_world[:, 2] - self.occ_origin[2]) / cell_fine).long()
+        in_bounds = (
+            (ix >= 0) & (ix < NX) &
+            (iy >= 0) & (iy < NY) &
+            (iz >= 0) & (iz < NZ)
+        )
+
+        # ── Gather visit counts at sampled body-frame positions ────────────
+        counts_flat = torch.zeros((flat_world.shape[0],), dtype=torch.float32, device=device)
+        if in_bounds.any():
+            counts_flat[in_bounds] = self.global_visit_counts[
+                env_id, iz[in_bounds], iy[in_bounds], ix[in_bounds]
+            ]
+        buf = counts_flat.reshape(NZF, NYF, NXF)
+
+        # ── Sum-pool fine (40, 80, 80) → coarse (8, 16, 16) ────────────────
+        coarse = F.avg_pool3d(buf.unsqueeze(0).unsqueeze(0),
+                              kernel_size=stride, stride=stride)
+        coarse = coarse.squeeze() * (stride ** 3)        # average × volume = sum
+
+        # ── SVS = Shannon entropy of normalised counts, occupied → 0 ───────
+        Nt = coarse.sum()
+        svs = torch.zeros_like(coarse)
+        if Nt > 0:
+            p = coarse / Nt
+            svs = torch.where(p > 0, -p * torch.log(p), svs)
+            local_occ = self._build_local_occ_map(env_id)
+            svs[local_occ > 0.5] = 0.0
         return svs
-      return torch.zeros_like(coarse)
 
-    # ── SECTION 3: Sample local occupancy map from global ─────────────────────
+    # ── SECTION 3: Sample local occupancy map from global, in BODY frame ──────
     def _build_local_occ_map(self, env_id: int) -> torch.Tensor:
-      pos_w = self._robot.data.root_pos_w[env_id]
-      local_pos = pos_w.clone()
-      local_pos[:2] -= self._terrain.env_origins[env_id, :2]
-      stride = self.local_stride
-      cz = int((local_pos[2] - self.occ_origin[2]) / self.occ_grid_size)
-      cy = int((local_pos[1] - self.occ_origin[1]) / self.occ_grid_size)
-      cx = int((local_pos[0] - self.occ_origin[0]) / self.occ_grid_size)
+        """
+        Binary local OCC in YAW-aligned body frame.
+        Output shape: (local_nz, local_ny, local_nx) = (8, 16, 16) at 0.25 m.
+        Drone is at the centre, +x is forward, +y is left, +z is world-up.
+        The fine 0.05 m global_occ_map is sampled at the world position of
+        every body-frame fine voxel, then max-pooled to the coarse local box.
+        """
+        device = self.device
+        cell_fine = self.occ_grid_size                          # 0.05 m
+        stride = self.local_stride                              # 5
 
-                                                                                                                                     
-      NZ, NY, NX = self.occ_map_dims
-      ghz, ghy, ghx = self.local_hz * stride, self.local_hy * stride, self.local_hx * stride                                         
-      z0, z1 = cz - ghz, cz + ghz                                                                                                    
-      y0, y1 = cy - ghy, cy + ghy
-      x0, x1 = cx - ghx, cx + ghx                                                                                                    
-                                                                                                                                     
-      buf = torch.zeros((z1 - z0, y1 - y0, x1 - x0), dtype=torch.float32, device=self.device)                                        
-      sz0, sz1 = max(z0, 0), min(z1, NZ)                                                                                             
-      sy0, sy1 = max(y0, 0), min(y1, NY)                                                                                             
-      sx0, sx1 = max(x0, 0), min(x1, NX)
-      if sz0 < sz1 and sy0 < sy1 and sx0 < sx1:                                                                                      
-          raw = self.global_occ_map[sz0:sz1, sy0:sy1, sx0:sx1]
-          buf[sz0-z0:sz1-z0, sy0-y0:sy1-y0, sx0-x0:sx1-x0] = (raw == 2).float()                                                      
-                                                                                                                                     
-      # max-pool: any occupied global voxel in the block → coarse voxel occupied                                                     
-      local_occ = F.max_pool3d(buf.unsqueeze(0).unsqueeze(0), kernel_size=stride, stride=stride)                                     
-      return local_occ.squeeze()  # (local_nz, local_ny, local_nx) 
+        NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx     # (8, 16, 16)
+        NZF, NYF, NXF = NZL * stride, NYL * stride, NXL * stride        # (40, 80, 80)
+        NZ, NY, NX = self.occ_map_dims                                  # fine grid dims
+
+        # ── Body-frame fine voxel centres (drone at origin) ───────────────
+        xs = (torch.arange(NXF, device=device).float() - NXF / 2.0 + 0.5) * cell_fine
+        ys = (torch.arange(NYF, device=device).float() - NYF / 2.0 + 0.5) * cell_fine
+        zs = (torch.arange(NZF, device=device).float() - NZF / 2.0 + 0.5) * cell_fine
+        grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
+        pos_body = torch.stack([grid_x, grid_y, grid_z], dim=-1)         # (NZF, NYF, NXF, 3)
+        flat_body = pos_body.reshape(-1, 3)                              # (M, 3)
+
+        # ── Body → world (apply drone yaw, then translate to drone pos) ───
+        drone_pos_w = self._robot.data.root_pos_w[env_id]                # (3,)
+        drone_quat_w = self._robot.data.root_quat_w[env_id]              # (4,)
+        yaw_quat = math_utils.yaw_quat(drone_quat_w.unsqueeze(0)).squeeze(0)
+        yaw_exp = yaw_quat.unsqueeze(0).expand(flat_body.shape[0], -1)
+        flat_world = math_utils.quat_apply(yaw_exp, flat_body) + drone_pos_w
+
+        # ── World → warehouse-local (env_origins subtraction) ─────────────
+        env_origin_xy = self._terrain.env_origins[env_id, :2]
+        flat_world[:, :2] -= env_origin_xy
+
+        # ── Warehouse-local position → fine voxel index ───────────────────
+        ix = ((flat_world[:, 0] - self.occ_origin[0]) / cell_fine).long()
+        iy = ((flat_world[:, 1] - self.occ_origin[1]) / cell_fine).long()
+        iz = ((flat_world[:, 2] - self.occ_origin[2]) / cell_fine).long()
+        in_bounds = (
+            (ix >= 0) & (ix < NX) &
+            (iy >= 0) & (iy < NY) &
+            (iz >= 0) & (iz < NZ)
+        )
+
+        # ── Gather global_occ_map values (OCCUPIED == 2) ──────────────────
+        buf_flat = torch.zeros((flat_world.shape[0],), dtype=torch.float32, device=device)
+        if in_bounds.any():
+            raw = self.global_occ_map[iz[in_bounds], iy[in_bounds], ix[in_bounds]]
+            buf_flat[in_bounds] = (raw == 2).float()
+        buf = buf_flat.reshape(NZF, NYF, NXF)
+
+        # ── Max-pool fine (40, 80, 80) → coarse (8, 16, 16) ───────────────
+        local_occ = F.max_pool3d(buf.unsqueeze(0).unsqueeze(0),
+                                 kernel_size=stride, stride=stride)
+        return local_occ.squeeze()       # (NZL, NYL, NXL)
 
     # ── SECTION 4: Stack the two maps as separate channels ────────────────────
     def _build_local_combined_map(self, env_id: int) -> torch.Tensor:

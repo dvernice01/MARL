@@ -6,7 +6,7 @@ quadcopter_rnn warehouse environment. Spawns within a restricted region
 and only saves maps that contain occupancy.
 
 Usage (from environment/quadcopter_rnn/):
-  python scripts/skrl/collect_dataset.py --task=Template-Quadcopter-Rnn-Direct-v0 --checkpoint=/workspace/environment/quadcopter_hierarchical_control/runs/manual_run/cosmic-smoke-232/26-05-18_14-18-46-704539_PPO/checkpoints/best_agent.pt --num_envs=3 --target_samples=1000 --seed=-1 --headless
+  python scripts/skrl/collect_occ_svs_dataset.py --task=Template-Quadcopter-Rnn-Direct-v0 --checkpoint=/workspace/environment/quadcopter_hierarchical_control/runs/manual_run/cosmic-smoke-232/26-05-18_14-18-46-704539_PPO/checkpoints/best_agent.pt --num_envs=3 --target_samples=1000 --seed=-1 --headless
 """
 
 """Launch Isaac Sim Simulator first."""
@@ -27,7 +27,7 @@ parser.add_argument("--checkpoint", type=str, required=True,
 parser.add_argument("--seed", type=int, default=-1)
 parser.add_argument("--target_samples", type=int, default=1000,
                     help="Number of new samples to collect")
-parser.add_argument("--output", type=str, default="outputs/dataset_3d_collection",
+parser.add_argument("--output", type=str, default="outputs/dataset_3d_collection_yaw_oriented",
                     help="Output directory for .npy samples")
 parser.add_argument("--goal_reached_dist", type=float, default=0.5,
                     help="Distance threshold to consider goal reached (m)")
@@ -209,8 +209,6 @@ def build_hc_observation(raw_env, prev_actions):
         ],
         dim=-1,
     )
-
-
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
