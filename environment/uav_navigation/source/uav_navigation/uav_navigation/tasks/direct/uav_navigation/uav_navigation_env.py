@@ -1297,21 +1297,19 @@ class UavNavigationEnv(DirectRLEnv):
 
         
         if self.common_step_counter % 30 == 0:
+            pos_drone  = self._robot.data.root_pos_w[0]
+            quat_drone = self._robot.data.root_quat_w[0]
+            pos_cam    = self.camera.data.pos_w[0]
+            quat_cam   = self.camera.data.quat_w_world[0]
+            env0_orig  = self._terrain.env_origins[0]
             d0 = depth[0]
-            finite = torch.isfinite(d0)
             n_inf = torch.isinf(d0).sum().item()
-            n_nan = torch.isnan(d0).sum().item()
-            n_fin = finite.sum().item()
-            if n_fin > 0:
-                finite_vals = d0[finite]
-                print(f"[depth env0] finite={n_fin}/{d0.numel()} "
-                    f"min={finite_vals.min().item():.3f} "
-                    f"max={finite_vals.max().item():.3f} "
-                    f"mean={finite_vals.mean().item():.3f} "
-                    f"inf={n_inf} nan={n_nan}")
-            else:
-                print(f"[depth env0] NO finite values, inf={n_inf} nan={n_nan}")
-
+            print(f"[step {self.common_step_counter}]")
+            print(f"  env_origin    = {env0_orig.tolist()}")
+            print(f"  drone pos_w   = {pos_drone.tolist()}")
+            print(f"  camera pos_w  = {pos_cam.tolist()}")
+            print(f"  camera quat_w = {quat_cam.tolist()}")
+            print(f"  inf/total     = {n_inf}/{d0.numel()}")
             # ── 2D VAE: depth → collision → recon (env 0) in one figure ────────
             depth_np      = (depth[0, :, :, 0] / self.max_depth).detach().cpu().numpy()
             collision_np  = collision[0, 0].detach().cpu().numpy()

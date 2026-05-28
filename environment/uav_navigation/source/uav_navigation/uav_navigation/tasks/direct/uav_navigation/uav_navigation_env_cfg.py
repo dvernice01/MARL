@@ -94,7 +94,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=16, env_spacing=80.0, replicate_physics=True
+        num_envs=16, env_spacing=2.5, replicate_physics=True
     )
 
     # robot
