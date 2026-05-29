@@ -26,8 +26,6 @@ from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-
-
 class UavNavigationEnvWindow(BaseEnvWindow):
     """Window manager for the Quadcopter environment."""
 
@@ -94,7 +92,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=16, env_spacing=2.5, replicate_physics=True
+        num_envs=10, env_spacing=2.5, replicate_physics=True
     )
 
     # robot
@@ -106,23 +104,20 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     
     # ── Online occupancy mapping ─────────────────────────────────────────
     occ_cell_size: float = 0.25
-    occ_samples_per_ray: int = 40   # voxels sampled along each LiDAR ray for FREE marking
+    occ_samples_per_ray: int = 40   
 
     # ── Distance-to-obstacles (smooth safety margin reward) ──────────────
-    safety_radius: float = 0.5                           # metres, ~saturates the reward at this distance
+    safety_radius: float = 0.5                          
    
     # ── Exploration (PDF-style v_t = γ·exp(-δ·N_t)) ──────────────────────
     exploration_gamma: float = 1.0
     exploration_delta: float = 0.01
 
     # ── Collision termination ─────────────────────────────────────────────
-    collision_distance: float = 0.3   # metres (PDF value); drone "dies" when
-                                       # any OCC voxel is within this distance.
-
+    collision_distance: float = 0.3  
   
     # Drone-mounted 360x90 LiDAR raycaster — feeds the OCC map.
-    # Mesh prim paths are injected at runtime in UavNavigationEnv._setup_scene
-    # once the warehouse USD is loaded.
+
     ray_caster: MultiMeshRayCasterCfg = MultiMeshRayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/body",
         update_period= 1.0 * decimation / 120,  # match LiDAR update rate (10 Hz)
@@ -142,6 +137,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     camera = CameraCfg(
         prim_path="/World/envs/env_.*/Robot/body/front_cam",  # aggiungere o togliere /Robot/body prima di front_cam in base a se stai collezionando dati o facendo RL
         update_period=1.0 * decimation / 120,
+        update_latest_camera_pose=True,  
         height=270,   # keep small for RL — 480x640 will crush perf at 4096 envs
         width=480,
         data_types=["distance_to_camera"],  # depth sensing
@@ -160,8 +156,8 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     )
 
     # reward scales
-    lin_vel_reward_scale = 0.1
-    ang_vel_reward_scale = 0.1
+    lin_vel_reward_scale = 0.0
+    ang_vel_reward_scale = 0.0
     distance_to_goal_reward_scale = 50.0
     rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1

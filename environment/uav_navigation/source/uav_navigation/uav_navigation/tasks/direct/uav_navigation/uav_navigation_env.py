@@ -89,11 +89,7 @@ class vae_config:
     return_sampled_latent = False
 
 class ae3d_config:
-    """
-    Mirror of the architectural hyperparams used to train the 3D AE.
-    Values MUST match the wandb config of run 8ivrdugy, otherwise the
-    state_dict will not load.
-    """
+
     use_ae3d = True
     latent_dim = 192                
     model_file = (
@@ -318,14 +314,14 @@ class VAEImageEncoder:
     # combine module path with model file name
         weight_file_path = self.config.model_file
         # load model weights
-        print("Loading weights from file: ", weight_file_path)
+        #print("Loading weights from file: ", weight_file_path)
         state_dict = self.collision.clean_state_dict(torch.load(weight_file_path))
         for k, v in state_dict.items():
             print(f"{k}: {v.shape}")
         missing, unexpected = self.vae_model.load_state_dict(state_dict, strict=False)
         #print(state_dict.keys())
-        print("Missing keys:   ", missing)
-        print("Unexpected keys:", unexpected)
+        #print("Missing keys:   ", missing)
+        #print("Unexpected keys:", unexpected)
         core_keys = [k for k in missing if "conv" in k or "dense0" in k]
         if core_keys:
             raise RuntimeError(f"Core architecture mismatch: {core_keys}")
@@ -526,122 +522,47 @@ class VAEImageEncoder:
 
 # --------------------------------------------
 
-
-
-    def get_latent_dims_size(self):
-        """
-        Function to get latent space dims
-        """
-        return self.config.latent_dims
+    # def get_latent_dims_size(self):
+    #     """
+    #     Function to get latent space dims
+    #     """
+    #     return self.config.latent_dims
     
-    def _preprocess_depth(self, depth: torch.Tensor) -> torch.Tensor:
-        depth = torch.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
-        depth = torch.clamp(depth, 0, self.max_depth)
-        depth = depth / self.max_depth
-        return depth
+    # def _preprocess_depth(self, depth: torch.Tensor) -> torch.Tensor:
+    #     depth = torch.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+    #     depth = torch.clamp(depth, 0, self.max_depth)
+    #     depth = depth / self.max_depth
+    #     return depth
     
-    def preprocess(self, depth_torch: torch.Tensor) -> torch.Tensor:
-        """
-        depth_torch: (N, H, W, 1)
-        returns: (N, 1, H, W)
-        """
+    # def preprocess(self, depth_torch: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     depth_torch: (N, H, W, 1)
+    #     returns: (N, 1, H, W)
+    #     """
 
-        depth_np = depth_torch.squeeze(-1).cpu().numpy()  # (N,H,W)
+    #     depth_np = depth_torch.squeeze(-1).cpu().numpy()  # (N,H,W)
 
-        collision_batch = []
-        for i in range(depth_np.shape[0]):
-            collision = self.collision.depth_to_collision_image(depth_np[i])
-            collision_batch.append(collision)
+    #     collision_batch = []
+    #     for i in range(depth_np.shape[0]):
+    #         collision = self.collision.depth_to_collision_image(depth_np[i])
+    #         collision_batch.append(collision)
 
-        collision_np = np.stack(collision_batch, axis=0)  # (N,H,W)
+    #     collision_np = np.stack(collision_batch, axis=0)  # (N,H,W)
 
-        collision = torch.from_numpy(collision_np).float().to(self.device)
+    #     collision = torch.from_numpy(collision_np).float().to(self.device)
 
-        collision = collision.unsqueeze(1)  # (N,1,H,W)
+    #     collision = collision.unsqueeze(1)  # (N,1,H,W)
 
-        # resize if needed
-        if collision.shape[-2:] != self.config.image_res:
-            collision = torch.nn.functional.interpolate(
-                collision,
-                size=self.config.image_res,
-                mode=self.config.interpolation_mode,
-            )
+    #     # resize if needed
+    #     if collision.shape[-2:] != self.config.image_res:
+    #         collision = torch.nn.functional.interpolate(
+    #             collision,
+    #             size=self.config.image_res,
+    #             mode=self.config.interpolation_mode,
+    #         )
 
-        return collision
+    #     return collision
 
-    def _get_depth_data_in_body_frame(self, max_depth) -> dict:
-        """
-        Returns a dict with the raw depth tensor and optional pointcloud.
-
-        Depth tensor shape : (num_envs, H, W, 1)  dtype: torch.float32
-        Values represent distance in METERS along the camera Z-axis.
-        Invalid / out-of-range pixels are filled with torch.inf or 0.0
-        depending on the clipping_range setting.
-        """
-        # ------------------------------------------------------------------
-        # RAW DEPTH IMAGE
-        # shape: (num_envs, H, W, 1), float32, unit: meters
-        # "distance_to_image_plane" = z-axis depth (standard pinhole model)
-        # "distance_to_camera"      = euclidean ray distance
-        # ------------------------------------------------------------------
-
-        depth: torch.Tensor = self.camera.data.output["distance_to_camera"]
-
-        # ------------------------------------------------------------------
-        # CLEAN invalid values (inf / nan → max_range, useful before feeding to NN)
-        # ------------------------------------------------------------------
-        max_range = self.cfg.camera.spawn.clipping_range[1]
-        depth= torch.nan_to_num(depth, nan=max_range, posinf=max_range, neginf=max_range)
-        depth = torch.clamp(depth, 0, max_depth)
-        depth_clean = depth / max_depth
-
-        # ------------------------------------------------------------------
-        # 2. CAMERA INTRINSICS & POSE (world frame)
-        #    intrinsic_matrices : (num_envs, 3, 3)
-        #    pos_w              : (num_envs, 3)   camera origin in world
-        #    quat_w_world       : (num_envs, 4)   camera orientation in world
-        #                         quaternion convention: (w, x, y, z)
-        # ------------------------------------------------------------------
-        K   = self.camera.data.intrinsic_matrices   # (N, 3, 3)
-        cam_pos_w  = self.camera.data.pos_w         # (N, 3)
-        cam_quat_w = self.camera.data.quat_w_world  # (N, 4)  w-first
-
-
-        # shape: (num_envs, H*W, 3) in camera frame
-        # points_cam = unproject_depth(
-        #     depth_clean,                          # (N, H, W, 1)
-        #     self.camera.data.intrinsic_matrices,  # (N, 3, 3)
-        # )
-        # transform to world frame using camera pose
-        points_world = transform_points(
-            depth_clean,
-            self.camera.data.pos_w,   # (N, 3) camera position in world
-            self.camera.data.quat_w_world,  # (N, 4) camera orientation
-        )  # shape: (N, H*W, 3)
-
-        body_pos_w  = self._robot.data.root_pos_w    # (N, 3)
-        body_quat_w = self._robot.data.root_quat_w   # (N, 4)
-
-        # Translate points so the body origin is at zero
-        points_centered = points_world - body_pos_w.unsqueeze(1)  
-
-        # Rotate from world frame into body frame using inverse body quaternion
-        body_quat_inv = quat_inv(body_quat_w)                     # (N, 4)
-
-        # quat_apply broadcasts over the point dimension
-        # expand quat to match (N, H*W, 4) for batched rotation
-        body_quat_inv_exp = body_quat_inv.unsqueeze(1).expand(-1, points_centered.shape[1], -1)
-        points_body = quat_apply(body_quat_inv_exp, points_centered) 
-
-        # ------------------------------------------------------------------
-        # 7. CAMERA ORIGIN in BODY FRAME
-        #    Same transform applied to the single camera position vector
-        # ------------------------------------------------------------------
-        cam_centered = (cam_pos_w - body_pos_w)                   # (N, 3)
-        cam_pos_body = quat_apply(body_quat_inv, cam_centered)    # (N, 3)
-
-        return points_body, cam_pos_body
-    
 class autoencoder_3d:
     """
     Merged module: persistent online OCC + visit-count buffers PLUS the
@@ -671,8 +592,8 @@ class autoencoder_3d:
         state_dict = torch.load(config.model_file, map_location=self.device)
         clean = {k.replace("module.", ""): v for k, v in state_dict.items()}
         missing, unexpected = self.model.load_state_dict(clean, strict=False)
-        print(f"[AE3D] Missing keys:    {missing}")
-        print(f"[AE3D] Unexpected keys: {unexpected}")
+        #print(f"[AE3D] Missing keys:    {missing}")
+        #print(f"[AE3D] Unexpected keys: {unexpected}")
         core = [k for k in missing if "conv" in k or "dense" in k]
         if core:
             raise RuntimeError(f"3D AE state_dict mismatch on core layers: {core}")
@@ -697,6 +618,9 @@ class autoencoder_3d:
         self.global_visit_counts = torch.zeros(
             (env.num_envs, self.NZ, self.NY, self.NX),
             dtype=torch.float32, device=self.device,
+        )
+        self.entered_new_cell = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=self.device,
         )
 
         # ── Local map shape ────────────────────────────────────────────────
@@ -730,8 +654,8 @@ class autoencoder_3d:
         with torch.no_grad():
             return torch.sigmoid(self.model.decode(latent))
 
-    def get_latent_dim(self) -> int:
-        return self.config.latent_dim
+    # def get_latent_dim(self) -> int:
+    #     return self.config.latent_dim
 
     # ── Body-frame local OCC (crop of persistent global_occ_map) ──────────────
     def _build_local_occ_map(self, env_id: int) -> torch.Tensor:
@@ -823,43 +747,43 @@ class autoencoder_3d:
             return svs, counts
         return svs
 
-    def build_local_features(self, env_id: int) -> dict:
-        """
-        One-pass per-env build: returns everything needed by both the
-        observation tensor and the reward function. Avoids redoing the
-        body-frame voxelisation in separate reward helpers.
+    # def build_local_features(self, env_id: int) -> dict:
+    #     """
+    #     One-pass per-env build: returns everything needed by both the
+    #     observation tensor and the reward function. Avoids redoing the
+    #     body-frame voxelisation in separate reward helpers.
 
-        Returned dict:
-          'combined':         (2, NZL, NYL, NXL)  channel 0 = OCC, channel 1 = SVS
-          'local_occ':        (NZL, NYL, NXL)     binary
-          'dist_to_obstacle': scalar tensor       metres, min distance to OCC voxel
-                                                  (= local-box half-extent if empty)
-          'Nt':               scalar tensor       sum of visit counts in the local box
-        """
-        local_occ = self._build_local_occ_map(env_id)
-        local_svs, counts = self._build_local_svs_map(
-            env_id, local_occ=local_occ, return_counts=True
-        )
+    #     Returned dict:
+    #       'combined':         (2, NZL, NYL, NXL)  channel 0 = OCC, channel 1 = SVS
+    #       'local_occ':        (NZL, NYL, NXL)     binary
+    #       'dist_to_obstacle': scalar tensor       metres, min distance to OCC voxel
+    #                                               (= local-box half-extent if empty)
+    #       'Nt':               scalar tensor       sum of visit counts in the local box
+    #     """
+    #     local_occ = self._build_local_occ_map(env_id)
+    #     local_svs, counts = self._build_local_svs_map(
+    #         env_id, local_occ=local_occ, return_counts=True
+    #     )
 
-        cell = self.occ_cell_size
-        max_dist = float(self.local_hx) * cell
+    #     cell = self.occ_cell_size
+    #     max_dist = float(self.local_hx) * cell
 
-        # Min metric distance from drone (body origin) to any OCC voxel.
-        occupied = torch.nonzero(local_occ > 0.5, as_tuple=False)   # (M, 3)  (iz, iy, ix)
-        if occupied.numel() > 0:
-            bz = (occupied[:, 0].float() - self.local_hz + 0.5) * cell
-            by = (occupied[:, 1].float() - self.local_hy + 0.5) * cell
-            bx = (occupied[:, 2].float() - self.local_hx + 0.5) * cell
-            dist_to_obstacle = torch.sqrt(bx * bx + by * by + bz * bz).min()
-        else:
-            dist_to_obstacle = torch.tensor(max_dist, device=self.env.device)
+    #     # Min metric distance from drone (body origin) to any OCC voxel.
+    #     occupied = torch.nonzero(local_occ > 0.5, as_tuple=False)   # (M, 3)  (iz, iy, ix)
+    #     if occupied.numel() > 0:
+    #         bz = (occupied[:, 0].float() - self.local_hz + 0.5) * cell
+    #         by = (occupied[:, 1].float() - self.local_hy + 0.5) * cell
+    #         bx = (occupied[:, 2].float() - self.local_hx + 0.5) * cell
+    #         dist_to_obstacle = torch.sqrt(bx * bx + by * by + bz * bz).min()
+    #     else:
+    #         dist_to_obstacle = torch.tensor(max_dist, device=self.env.device)
 
-        return {
-            "combined":         torch.stack([local_occ, local_svs], dim=0),
-            "local_occ":        local_occ,
-            "dist_to_obstacle": dist_to_obstacle,
-            "Nt":               counts.sum(),
-        }
+    #     return {
+    #         "combined":         torch.stack([local_occ, local_svs], dim=0),
+    #         "local_occ":        local_occ,
+    #         "dist_to_obstacle": dist_to_obstacle,
+    #         "Nt":               counts.sum(),
+    #     }
 
     def build_local_features_batched(self) -> dict:
         """
@@ -894,9 +818,7 @@ class autoencoder_3d:
         world_flat = quat_apply(yaw_flat, body_flat).reshape(N, M, 3)              # (N, M, 3)
         world_flat = world_flat + drone_pos_w.unsqueeze(1)
 
-        env_origin_xy = env._terrain.env_origins[:, :2]                            # (N, 2)
-        world_flat[:, :, :2] -= env_origin_xy.unsqueeze(1)
-
+        # Shared-warehouse: index global grids by world coordinates directly.
         ix = ((world_flat[:, :, 0] - self.occ_origin[0]) / cell).long()
         iy = ((world_flat[:, :, 1] - self.occ_origin[1]) / cell).long()
         iz = ((world_flat[:, :, 2] - self.occ_origin[2]) / cell).long()
@@ -953,37 +875,39 @@ class autoencoder_3d:
             "Nt":               Nt,
         }
 
-
-
     # ── Per-step buffer updates from sensors ──────────────────────────────────
     def _update_visit_counts(self, env_ids: torch.Tensor | None = None):
         env = self.env
         if env_ids is None:
             env_ids = torch.arange(env.num_envs, device=env.device)
 
-        env_origins = env.scene.env_origins[env_ids]
         NZ, NY, NX = self.occ_map_dims
         cell = self.occ_cell_size
 
-        pos_w = env._robot.data.root_pos_w[env_ids]
-        local_pos = pos_w.clone()
-        local_pos[:, :2] -= env_origins[:, :2]
+        self.entered_new_cell.zero_()
 
-        iz = ((local_pos[:, 2] - self.occ_origin[2]) / cell).long()
-        iy = ((local_pos[:, 1] - self.occ_origin[1]) / cell).long()
-        ix = ((local_pos[:, 0] - self.occ_origin[0]) / cell).long()
+        pos_w = env._robot.data.root_pos_w[env_ids]
+
+        iz = ((pos_w[:, 2] - self.occ_origin[2]) / cell).long()
+        iy = ((pos_w[:, 1] - self.occ_origin[1]) / cell).long()
+        ix = ((pos_w[:, 0] - self.occ_origin[0]) / cell).long()
         valid = (iz >= 0) & (iz < NZ) & (iy >= 0) & (iy < NY) & (ix >= 0) & (ix < NX)
         if valid.any():
             ve = env_ids[valid]
-            self.global_visit_counts[ve, iz[valid], iy[valid], ix[valid]] += 1.0
+            izv, iyv, ixv = iz[valid], iy[valid], ix[valid]
+            # Sample the counts BEFORE incrementing: a count of 0 means this
+            # voxel is being entered for the first time.
+            counts_before = self.global_visit_counts[ve, izv, iyv, ixv]
+            is_first_visit = counts_before == 0
+            self.global_visit_counts[ve, izv, iyv, ixv] += 1.0
+            # Mark only the envs that actually entered a fresh voxel.
+            self.entered_new_cell[ve[is_first_visit]] = True
 
         hits_w = env.ray_caster.data.ray_hits_w[env_ids]
         hits_valid = torch.isfinite(hits_w).all(dim=-1)
-        hits_local = hits_w.clone()
-        hits_local[..., :2] -= env_origins.unsqueeze(1)[..., :2]
-        hix = ((hits_local[..., 0] - self.occ_origin[0]) / cell).long()
-        hiy = ((hits_local[..., 1] - self.occ_origin[1]) / cell).long()
-        hiz = ((hits_local[..., 2] - self.occ_origin[2]) / cell).long()
+        hix = ((hits_w[..., 0] - self.occ_origin[0]) / cell).long()
+        hiy = ((hits_w[..., 1] - self.occ_origin[1]) / cell).long()
+        hiz = ((hits_w[..., 2] - self.occ_origin[2]) / cell).long()
         hits_in_bounds = (
             (hix >= 0) & (hix < NX) &
             (hiy >= 0) & (hiy < NY) &
@@ -997,33 +921,34 @@ class autoencoder_3d:
                 env_idx_grid[write], hiz[write], hiy[write], hix[write]
             ] = 1
 
-    def _save_local_maps(self, env_ids: torch.Tensor):
-        step = self.env.common_step_counter
-        for env_id in env_ids.tolist():
-            combined = self.build_local_features(env_id)["combined"]
-            path = os.path.join(LOCAL_MAPS_SAVE_DIR, f"env{env_id}_step{step}.npy")
-            np.save(path, combined.cpu().numpy())
+
+    # def _save_local_maps(self, env_ids: torch.Tensor):
+    #     step = self.env.common_step_counter
+    #     for env_id in env_ids.tolist():
+    #         combined = self.build_local_features(env_id)["combined"]
+    #         path = os.path.join(LOCAL_MAPS_SAVE_DIR, f"env{env_id}_step{step}.npy")
+    #         np.save(path, combined.cpu().numpy())
 
 
-    def _save_online_occ_viz(self, env_id: int = 0, save_dir: str | None = None):
-        if save_dir is None:
-            save_dir = "/workspace/environment/uav_navigation/outputs"
-        os.makedirs(save_dir, exist_ok=True)
-        step = self.env.common_step_counter
-        local_occ = self._build_local_occ_map(env_id).cpu().numpy()
-        iz, iy, ix = np.where(local_occ > 0.5)
-        fig = plt.figure(figsize=(10, 7))
-        ax = fig.add_subplot(111, projection="3d")
-        if len(iz):
-            ax.scatter(ix, iy, iz, s=30, c="red", alpha=0.5, marker="s")
-        ax.scatter([self.local_hx], [self.local_hy], [self.local_hz],
-                   s=180, c="blue", marker="o")
-        ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
-        ax.set_title(f"Local OCC env{env_id} step{step}")
-        plt.tight_layout()
-        # plt.savefig(os.path.join(save_dir, f"online_occ_env{env_id}_step{step}.png"),
-        #             dpi=120, bbox_inches="tight")
-        plt.close()
+    # def _save_online_occ_viz(self, env_id: int = 0, save_dir: str | None = None):
+    #     if save_dir is None:
+    #         save_dir = "/workspace/environment/uav_navigation/outputs"
+    #     os.makedirs(save_dir, exist_ok=True)
+    #     step = self.env.common_step_counter
+    #     local_occ = self._build_local_occ_map(env_id).cpu().numpy()
+    #     iz, iy, ix = np.where(local_occ > 0.5)
+    #     fig = plt.figure(figsize=(10, 7))
+    #     ax = fig.add_subplot(111, projection="3d")
+    #     if len(iz):
+    #         ax.scatter(ix, iy, iz, s=30, c="red", alpha=0.5, marker="s")
+    #     ax.scatter([self.local_hx], [self.local_hy], [self.local_hz],
+    #                s=180, c="blue", marker="o")
+    #     ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
+    #     ax.set_title(f"Local OCC env{env_id} step{step}")
+    #     plt.tight_layout()
+    #     # plt.savefig(os.path.join(save_dir, f"online_occ_env{env_id}_step{step}.png"),
+    #     #             dpi=120, bbox_inches="tight")
+    #     plt.close()
 
 
 class UavNavigationEnv(DirectRLEnv):
@@ -1066,6 +991,8 @@ class UavNavigationEnv(DirectRLEnv):
                 "time_out",
                 "action_reg_diff",
                 "final_distance_to_goal",
+                "mean_dist_to_obstacle",   
+                "cells_visited",           
             ]
         }
 
@@ -1148,9 +1075,6 @@ class UavNavigationEnv(DirectRLEnv):
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
 
         # ── Enumerate warehouse mesh prims for the OCC raycaster ──────────
-        # Same enumeration pattern as vae_container/Vae/occupancymap3d_fw.py,
-        # rooted at /World/ground (where TerrainImporterCfg places the
-        # full_warehouse USD).
 
         stage = omni.usd.get_context().get_stage()
         mesh_paths = []
@@ -1197,21 +1121,19 @@ class UavNavigationEnv(DirectRLEnv):
     def _get_observations(self) -> dict:
         # ── Update visit counts at every step (all envs) ──────────────────────
         self.autoencoder3D._update_visit_counts()
+        
+        pos_w = self._robot.data.root_pos_w
+        self.distance_to_bounds_x = (pos_w[:, 0] > self.x_min + 0.3) & (pos_w[:, 0] < self.x_max - 0.3)
+        self.distance_to_bounds_y = (pos_w[:, 1] > self.y_min + 0.3) & (pos_w[:, 1] < self.y_max - 0.3)
 
-        origins = self.scene.env_origins    
-        self.distance_to_bounds_x = ((self._robot.data.root_pos_w[:, 0] - origins[:, 0] > self.x_min)) & ((self.x_max > self._robot.data.root_pos_w[:, 0] - origins[:, 0]))
-        self.distance_to_bounds_y = ((self._robot.data.root_pos_w[:, 1] - origins[:, 1] > self.y_min)) & ((self.y_max > self._robot.data.root_pos_w[:, 1] - origins[:, 1]))
-                                                                                                                                  
-        pos_w   = self._robot.data.root_pos_w
-        local_x = pos_w[:, 0] - origins[:, 0]                                                                                                                                
-        local_y = pos_w[:, 1] - origins[:, 1]                                                                                                                                
-        is_alive = (                                                                                                                                                         
-            (local_x > self.x_min) & (local_x < self.x_max) &                                                                                                                
-            (local_y > self.y_min) & (local_y < self.y_max) &
-            (pos_w[:, 2] > self.z_min) & (pos_w[:, 2] < self.z_max)                                                                                                          
-        )                                                          
-        self.alive_steps[is_alive]  += 1                                                                                                                                     
-        self.alive_steps[~is_alive] = 0 
+        is_alive = (
+            self.distance_to_bounds_x &
+            self.distance_to_bounds_y &
+            (pos_w[:, 2] > self.z_min) & (pos_w[:, 2] < self.z_max)
+        )
+        self.alive_steps[is_alive]  += 1
+        self.alive_steps[~is_alive] = 0
+
                                                                                                                                                                             
         # ── Save maps periodically — only for envs alive long enough ──────────
         # if LOCAL_MAP_SAVE_EVERY > 0 and self.common_step_counter >= LOCAL_MAP_START_STEP and self.common_step_counter % LOCAL_MAP_SAVE_EVERY == 0:                                                                               
@@ -1237,12 +1159,8 @@ class UavNavigationEnv(DirectRLEnv):
         # (N, H, W, 1) → (N, H*W) → min over pixels → (N,)
         self._min_depth_cache = depth_clean.flatten(1).min(dim=1).values
 
-
-        # preprocess (VERY IMPORTANT)
         collision = self.vae_encoder.preprocess_hybrid(depth)
-        # assert not torch.isnan(collision).any(), f"NaN in collision: {collision.min()}, {collision.max()}"
-        # assert not torch.isinf(collision).any(), f"Inf in collision: {collision.min()}, {collision.max()}"
-    
+
         # ── 2D VAE latent (depth → collision image → latent) ─────────────────
         latent_2d = self.vae_encoder.encode(collision)            # (N, 512)
 
@@ -1253,83 +1171,83 @@ class UavNavigationEnv(DirectRLEnv):
         self._Nt_cache               = feats["Nt"]                         # (N,)
         latent_3d = self.autoencoder3D.encode(combined)                    # (N, latent_dim_3d)
 
-        if self.common_step_counter % 30 == 0:
-            # ── 3D AE: target (preprocessed) vs reconstructed (env 0) ──────────
-            target = self.autoencoder3D.preprocess(combined[0:1])      # (1, 2, NZ, NY, NX)
-            recon  = self.autoencoder3D.decode(latent_3d[0:1])         # (1, 2, NZ, NY, NX), sigmoid-ed
-            target_np = target[0].detach().cpu().numpy()
-            recon_np  = recon[0].detach().cpu().numpy()
+        # if self.common_step_counter % 30 == 0:
+        #     # ── 3D AE: target (preprocessed) vs reconstructed (env 0) ──────────
+        #     target = self.autoencoder3D.preprocess(combined[0:1])      # (1, 2, NZ, NY, NX)
+        #     recon  = self.autoencoder3D.decode(latent_3d[0:1])         # (1, 2, NZ, NY, NX), sigmoid-ed
+        #     target_np = target[0].detach().cpu().numpy()
+        #     recon_np  = recon[0].detach().cpu().numpy()
 
-            fig = plt.figure(figsize=(14, 8))
-            fig.suptitle(f"Step {self.common_step_counter} — env 0 local maps", fontsize=12)
+        #     fig = plt.figure(figsize=(14, 8))
+        #     fig.suptitle(f"Step {self.common_step_counter} — env 0 local maps", fontsize=12)
 
-            for row, (data, label) in enumerate([(target_np, "Target"), (recon_np, "Recon")]):
-                occ = data[0]
-                svs = data[1]
+        #     for row, (data, label) in enumerate([(target_np, "Target"), (recon_np, "Recon")]):
+        #         occ = data[0]
+        #         svs = data[1]
 
-                ax = fig.add_subplot(2, 2, row * 2 + 1, projection="3d")
-                iz, iy, ix = np.where(occ > 0.5)
-                if len(iz):
-                    ax.scatter(ix, iy, iz, s=20, c="red", alpha=0.4, marker="s")
-                ax.set_xlim(0, occ.shape[2] - 1)
-                ax.set_ylim(0, occ.shape[1] - 1)
-                ax.set_zlim(0, occ.shape[0] - 1)
-                ax.set_title(f"{label} OCC ({len(iz)} voxels)")
-                ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
+        #         ax = fig.add_subplot(2, 2, row * 2 + 1, projection="3d")
+        #         iz, iy, ix = np.where(occ > 0.5)
+        #         if len(iz):
+        #             ax.scatter(ix, iy, iz, s=20, c="red", alpha=0.4, marker="s")
+        #         ax.set_xlim(0, occ.shape[2] - 1)
+        #         ax.set_ylim(0, occ.shape[1] - 1)
+        #         ax.set_zlim(0, occ.shape[0] - 1)
+        #         ax.set_title(f"{label} OCC ({len(iz)} voxels)")
+        #         ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
 
-                ax2 = fig.add_subplot(2, 2, row * 2 + 2, projection="3d")
-                iz2, iy2, ix2 = np.where(svs > 0.15)
-                if len(iz2):
-                    vals = svs[iz2, iy2, ix2]
-                    sc = ax2.scatter(ix2, iy2, iz2, s=20, c=vals,
-                                     cmap="viridis", alpha=0.5, marker="s",
-                                     vmin=0.0, vmax=1.0)
-                    fig.colorbar(sc, ax=ax2, shrink=0.5)
-                ax2.set_xlim(0, svs.shape[2] - 1)
-                ax2.set_ylim(0, svs.shape[1] - 1)
-                ax2.set_zlim(0, svs.shape[0] - 1)
-                ax2.set_title(f"{label} SVS")
-                ax2.set_xlabel("body x"); ax2.set_ylabel("body y"); ax2.set_zlabel("body z")
+        #         ax2 = fig.add_subplot(2, 2, row * 2 + 2, projection="3d")
+        #         iz2, iy2, ix2 = np.where(svs > 0.15)
+        #         if len(iz2):
+        #             vals = svs[iz2, iy2, ix2]
+        #             sc = ax2.scatter(ix2, iy2, iz2, s=20, c=vals,
+        #                              cmap="viridis", alpha=0.5, marker="s",
+        #                              vmin=0.0, vmax=1.0)
+        #             fig.colorbar(sc, ax=ax2, shrink=0.5)
+        #         ax2.set_xlim(0, svs.shape[2] - 1)
+        #         ax2.set_ylim(0, svs.shape[1] - 1)
+        #         ax2.set_zlim(0, svs.shape[0] - 1)
+        #         ax2.set_title(f"{label} SVS")
+        #         ax2.set_xlabel("body x"); ax2.set_ylabel("body y"); ax2.set_zlabel("body z")
 
-            plt.tight_layout()
-            plt.savefig("local_maps_check.png", dpi=120, bbox_inches="tight")
-            plt.close()
+        #     plt.tight_layout()
+        #     plt.savefig("local_maps_check.png", dpi=120, bbox_inches="tight")
+        #     plt.close()
 
         
-        if self.common_step_counter % 30 == 0:
-            pos_drone  = self._robot.data.root_pos_w[0]
-            quat_drone = self._robot.data.root_quat_w[0]
-            pos_cam    = self.camera.data.pos_w[0]
-            quat_cam   = self.camera.data.quat_w_world[0]
-            env0_orig  = self._terrain.env_origins[0]
-            d0 = depth[0]
-            n_inf = torch.isinf(d0).sum().item()
-            print(f"[step {self.common_step_counter}]")
-            print(f"  env_origin    = {env0_orig.tolist()}")
-            print(f"  drone pos_w   = {pos_drone.tolist()}")
-            print(f"  camera pos_w  = {pos_cam.tolist()}")
-            print(f"  camera quat_w = {quat_cam.tolist()}")
-            print(f"  inf/total     = {n_inf}/{d0.numel()}")
-            # ── 2D VAE: depth → collision → recon (env 0) in one figure ────────
-            depth_np      = (depth[0, :, :, 0] / self.max_depth).detach().cpu().numpy()
-            collision_np  = collision[0, 0].detach().cpu().numpy()
-            recon_2d      = self.vae_encoder.decode(latent_2d[0:1])
-            recon_np      = recon_2d[0, 0].detach().cpu().numpy()
+        # if self.common_step_counter % 30 == 0:
+        #     # pos_drone  = self._robot.data.root_pos_w[0]
+        #     # quat_drone = self._robot.data.root_quat_w[0]
+        #     # pos_cam    = self.camera.data.pos_w[0]
+        #     # quat_cam   = self.camera.data.quat_w_world[0]
+        #     # env0_orig  = self._terrain.env_origins[0]
+        #     # d0 = depth[0]
+        #     # n_inf = torch.isinf(d0).sum().item()
+        #     # print(f"[step {self.common_step_counter}]")
+        #     # print(f"  env_origin    = {env0_orig.tolist()}")
+        #     # print(f"  drone pos_w   = {pos_drone.tolist()}")
+        #     # print(f"  camera pos_w  = {pos_cam.tolist()}")
+        #     # print(f"  camera quat_w = {quat_cam.tolist()}")
+        #     # print(f"  inf/total     = {n_inf}/{d0.numel()}")
+        #     # ── 2D VAE: depth → collision → recon (env 0) in one figure ────────
+        #     depth_np      = (depth[0, :, :, 0] / self.max_depth).detach().cpu().numpy()
+        #     collision_np  = collision[0, 0].detach().cpu().numpy()
+        #     recon_2d      = self.vae_encoder.decode(latent_2d[0:1])
+        #     recon_np      = recon_2d[0, 0].detach().cpu().numpy()
 
-            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-            fig.suptitle(f"Step {self.common_step_counter} — env 0 2D VAE", fontsize=12)
+        #     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        #     fig.suptitle(f"Step {self.common_step_counter} — env 0 2D VAE", fontsize=12)
 
-            titles = ["Depth (normalized)", "Collision (VAE input)", "Reconstruction"]
-            images = [depth_np, collision_np, recon_np]
+        #     titles = ["Depth (normalized)", "Collision (VAE input)", "Reconstruction"]
+        #     images = [depth_np, collision_np, recon_np]
 
-            for ax, img, title in zip(axes, images, titles):
-                im = ax.imshow(img, cmap="plasma", vmin=0, vmax=1)
-                ax.set_title(title)
-                ax.axis("off")
+        #     for ax, img, title in zip(axes, images, titles):
+        #         im = ax.imshow(img, cmap="plasma", vmin=0, vmax=1)
+        #         ax.set_title(title)
+        #         ax.axis("off")
 
-            fig.colorbar(im, ax=axes, shrink=0.7, fraction=0.02, pad=0.02)
-            plt.savefig("vae2d_check.png", dpi=120, bbox_inches="tight")
-            plt.close()
+        #     fig.colorbar(im, ax=axes, shrink=0.7, fraction=0.02, pad=0.02)
+        #     plt.savefig("vae2d_check.png", dpi=120, bbox_inches="tight")
+        #     plt.close()
 
         obs = torch.cat(
             [
@@ -1349,14 +1267,15 @@ class UavNavigationEnv(DirectRLEnv):
 
 
     def _get_rewards(self) -> torch.Tensor:
-       
+        
+        self._episode_sums["mean_dist_to_obstacle"] += self._dist_to_obstacle_cache * self.step_dt
         origins = self.scene.env_origins
         lin_vel_sum = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel_sum = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
         lin_vel = 1 - torch.tanh(lin_vel_sum / 0.8)
         ang_vel = 1 - torch.tanh(ang_vel_sum / 0.8)
         self._episode_sums["final_distance_to_goal"] += self.final_distance_to_goal * self.step_dt
-        distance_to_goal_mapped = 1 - torch.tanh(self.final_distance_to_goal / 0.8)
+        distance_to_goal_mapped = 1 - torch.tanh(self.final_distance_to_goal / 8.0)
 
         action_diff = self._actions - self._prev_actions
         action_reg_diff = torch.norm(action_diff, p=2, dim=-1)
@@ -1374,8 +1293,9 @@ class UavNavigationEnv(DirectRLEnv):
         # ── Distance to obstacles ─────────────────────────────────────────
         dist_to_obs_reward = torch.tanh(self._min_depth_cache / self.cfg.safety_radius)
 
-        exploration_reward = self.cfg.exploration_gamma * torch.exp(
-            -self.cfg.exploration_delta * self._Nt_cache
+        exploration_reward = (
+            self.cfg.exploration_gamma
+            * self.autoencoder3D.entered_new_cell.float()
         )
 
         rewards = {
@@ -1421,6 +1341,16 @@ class UavNavigationEnv(DirectRLEnv):
         self._episode_sums["died"] += num_deaths
         self._episode_sums["died_collision"] += num_deaths_collision
         self._episode_sums["time_out"] += num_timeouts
+        cells_visited_per_env = (
+            self.autoencoder3D.global_visit_counts[env_ids] > 0
+        ).flatten(1).sum(dim=1).float()
+        self._episode_sums["cells_visited"][env_ids] = (
+            cells_visited_per_env * self.max_episode_length_s
+        )
+
+        # ── Reset visit counts for terminated envs ────────────────────────────
+        self.autoencoder3D.global_visit_counts[env_ids] = 0.0
+        self.autoencoder3D.global_occ_map[env_ids] = 0
 
         self.extras["log"] = dict()
         extras = dict()
@@ -1428,7 +1358,7 @@ class UavNavigationEnv(DirectRLEnv):
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
             if key in ["died", "died_collision", "time_out"]:
                 extras["Episode_Termination/" + key] = episodic_sum_avg / self.max_episode_length_s
-            elif key in ["final_distance_to_goal"]:
+            elif key in ["final_distance_to_goal", "mean_dist_to_obstacle", "cells_visited"]:
                 extras["Episode_Info/" + key] = episodic_sum_avg / self.max_episode_length_s
             else:
                 extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
@@ -1443,35 +1373,26 @@ class UavNavigationEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self.alive_steps[env_ids] = 0
 
-
-        n = len(env_ids)
-        self._desired_pos_w[env_ids, 0] = torch.zeros_like(
+        self._desired_pos_w[env_ids, 0] = torch.empty_like(
             self._desired_pos_w[env_ids, 0]
         ).uniform_(self.x_min + 1.0, self.x_max - 1.0)
-        self._desired_pos_w[env_ids, 1] = torch.zeros_like(
+        self._desired_pos_w[env_ids, 1] = torch.empty_like(
             self._desired_pos_w[env_ids, 1]
-        ).uniform_(0.0, self.y_max - 1.0)
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(
+        ).uniform_(self.y_min + 1.0, self.y_max - 1.0)
+        self._desired_pos_w[env_ids, 2] = torch.empty_like(
             self._desired_pos_w[env_ids, 2]
         ).uniform_(self.z_min + 1.0, self.z_max - 1.0)
-        self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
 
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
-        default_root_state[:, 0] = torch.zeros_like(default_root_state[:, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
-        default_root_state[:, 1] = torch.zeros_like(default_root_state[:, 1]).uniform_(0.0, self.y_max - 1.0)
-        default_root_state[:, :2] += self._terrain.env_origins[env_ids, :2]
-        default_root_state[:, 2] = torch.zeros_like(default_root_state[:, 2]).uniform_(self.z_min + 1.0, self.z_max - 1.0)
+        default_root_state[:, 0] = torch.empty_like(default_root_state[:, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
+        default_root_state[:, 1] = torch.empty_like(default_root_state[:, 1]).uniform_(self.y_min + 1.0, self.y_max - 1.0)
+        default_root_state[:, 2] = torch.empty_like(default_root_state[:, 2]).uniform_(self.z_min + 1.0, self.z_max - 1.0)
 
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
-
-        # ── Reset visit counts for terminated envs ────────────────────────────
-        self.autoencoder3D.global_visit_counts[env_ids] = 0.0
-        self.autoencoder3D.global_occ_map[env_ids] = 0
-
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         pass
