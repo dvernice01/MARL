@@ -209,7 +209,6 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
         ang_vel_sum = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
         lin_vel = 1 - torch.tanh(lin_vel_sum / 0.8)
         ang_vel = 1 - torch.tanh(ang_vel_sum / 0.8)
-        self._episode_sums["final_distance_to_goal"] += self.final_distance_to_goal * self.step_dt
         distance_to_goal_mapped = 1 - torch.tanh(self.final_distance_to_goal / 0.8)
         
         square_side = self.arena_size  
@@ -263,6 +262,13 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
         #self._episode_sums["world pos z"] += self._robot.data.root_pos_w[:, 2] * self.step_dt
         #self._episode_sums["distance to bound x"] += self.distance_to_bounds_x * self.step_dt
         #self._episode_sums["distance to bound y"] += self.distance_to_bounds_y * self.step_dt
+            # in _reset_idx, BEFORE the goal/robot get re-sampled
+        terminal_distance = torch.linalg.norm(
+            self._desired_pos_w[env_ids] - self._robot.data.root_pos_w[env_ids],
+            dim=1,
+        )
+        self._episode_sums["final_distance_to_goal"][env_ids] = terminal_distance
+
 
         self.extras["log"] = dict()
         extras = dict()
@@ -272,7 +278,7 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
             if key in ["died", "time_out"]:
                 extras["Episode_Termination/" + key] = episodic_sum_avg / self.max_episode_length_s
             elif key in ["final_distance_to_goal"]:
-                extras["Episode_Info/" + key] = episodic_sum_avg / self.max_episode_length_s
+                extras["Episode_Info/" + key] = episodic_sum_avg 
             else:
                 extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0  # azzerato DOPO aver letto

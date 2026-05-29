@@ -148,7 +148,7 @@ Risposte: Essendo una tesi, non ho problemi di lunghezza. Quando scrivi qualcosa
 
 Risorse: Prenditi il tuo tempo ma scrivi porzioni che siano ampie e complete. Ricerca fonti autorevoli e numerose prima di scrivere qualcosa.
 
-Modalità: Non scrivere niente di cui non sei sicuro. Non scrivere niente che possa sembrare scritto da AI, tipo "Ecco a te la risposta" o altre cose simili. Usa le virgole al posto di -- per scrivere informazioni aggiuntive. Non scrivere parole in grassetto, corsivo, italian text o altri formati a meno che non si tratti di titoli o sottotitoli. Nella bibliografia inserisci solo le menzioni, nient'altro, nè commenti nè niente. Non usare \texttt{}, \emph{}, \textbf{}, \textit{}, \underline{}, \verb{} or \path{}
+Modalità: Non scrivere niente di cui non sei sicuro. Non scrivere niente che possa sembrare scritto da AI, tipo "Ecco a te la risposta" o altre cose simili. Usa le virgole al posto di -- per scrivere informazioni aggiuntive. Non scrivere parole in grassetto, corsivo, italian text o altri formati a meno che non si tratti di titoli o sottotitoli. Nella bibliografia inserisci solo le menzioni, nient'altro, nè commenti nè niente. Non usare \texttt{}, \emph{}, \textbf{}, \textit{}, \underline{}, \verb{} or \path{}. Non aggiungere codice per spiegare i file in Latex
 
 Contesto: Mi sto laureando in Ingegneria dell'automazione e mi occupo di Robotica. Quindi parla come se fossi di questo settore.
 

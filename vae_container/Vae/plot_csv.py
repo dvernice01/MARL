@@ -11,11 +11,11 @@ It does NOT accept a W&B *runs-table* export (one row per run): that file has no
 time axis and the script will refuse it with an explanatory message.
 
 Examples:
-    python plot_csv.py run_for_thesis/lin_vel_tracking_vc.csv
-    python plot_csv.py run_for_thesis/lin_vel_tracking_vc.csv \
-        --columns "Info/Episode_Info/lin_vel_mae" "Loss/Value loss" \
-        --title "Velocity tracking error" --xlabel "Training steps" \
-        --ylabel "MAE" --ema 0.9 --dpi 300
+    python plot_csv.py run_for_thesis/lin_mae_vc.csv
+    python plot_csv.py run_for_thesis/Vae_csv/val_kl_loss_vae.csv \
+        --columns "brisk-sweep-1 - val/kl_loss" \
+        --title "Validation Results" --xlabel "Training steps" \
+        --ylabel "KL-function loss" --ema 0.9 --dpi 300
 """
 
 import argparse
