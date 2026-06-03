@@ -2,7 +2,7 @@
 
 # SUCCESSIVAMENTE VERRA' INTEGRATA LA PARTE RELATIVA AGLI ALTRI TRAINING.
 
-I file di interesse sono quelli in riferimento al progetto: "uav_navigation".
+I file di interesse sono quelli in riferimento al progetto: "environment/uav_navigation".
 
 Gli scripts per il training seguono la logica di quelli che mi condividesti tu.
 
