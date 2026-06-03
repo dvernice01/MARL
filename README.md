@@ -21,6 +21,8 @@ Troverai quindi:
                         ├── autoencoder3D.py         # 3D-AE architecture
                         ├── uav_navigation_env.py    # Environment definition
                         └── uav_navigation_env_cfg.py # Environment configuration
+
+
 I files "train_manual" e "ppo_agent" sono molto simili ai tuoi. Un cambiamento importante è, però, la presenza della GRU nell'architettura.
 I files che descrivono l'architettura delle reti presentano dei commenti pressocchè AI-generated ma sono esattamente gli stessi file usati per il ML-training.
 Il file "uav_navigation_env.py" contiene una serie di brevi commenti che spiegano l'utilità delle varie classi. Anche in questo caso la struttura riprende quelle usate durante 
