@@ -62,7 +62,7 @@ LOCAL_MAP_START_STEP = 0
 LOCAL_CELL_SIZE = 0.25
 ONLINE_OCC_VIZ_EVERY = 500    # steps between online-OCC sanity plots; 0 to disable
 
-
+# Policy Architecture per Velocity controller
 class PolicyNet(torch.nn.Module):
     def __init__(self, input_dim=13, output_dim=4, hidden_dim=256):
         super().__init__()
@@ -75,6 +75,8 @@ class PolicyNet(torch.nn.Module):
         )
     def forward(self, x):
         return self.net(x)
+
+# Classi di configurazione Vae e 3D-AE con latent_dim, path to checkpoint, e altre informazioni utili
 
 class vae_config:
     use_vae = True
@@ -103,6 +105,8 @@ class ae3d_config:
     residual_every     = 2
     use_skip           = True
     svs_max            = 0.243812
+
+# Classe con metodi per la trasformazioni delle immagini da Depth a Collision. L'uso di cv2.Canny dovrebbe rallentare perchè funziona su CPU
 
 class CollisionImage:
     def __init__(self):
@@ -285,7 +289,7 @@ class CollisionImage:
             clean_dict[key] = value
         return clean_dict
 
-
+# Classe per VAE. Sono state lasciate le funzioni modificate che lasciassere uguale il procedimento ma velocizzassero i tempi. Le altre sono commentate
 class VAEImageEncoder:
 
     def __init__(self, config, device="cuda:0"):
@@ -562,6 +566,8 @@ class VAEImageEncoder:
     #         )
 
     #     return collision
+
+# Classe per 3D autoencoder. Vale la stessa cosa del VAE quindi le funzioni commentate sono quelle che rallentavano.
 
 class autoencoder_3d:
     """
@@ -949,6 +955,8 @@ class autoencoder_3d:
     #     # plt.savefig(os.path.join(save_dir, f"online_occ_env{env_id}_step{step}.png"),
     #     #             dpi=120, bbox_inches="tight")
     #     plt.close()
+
+# Classe che descrive l'environment con la struttura di sempre.
 
 
 class UavNavigationEnv(DirectRLEnv):
