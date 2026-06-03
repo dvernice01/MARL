@@ -6,6 +6,7 @@ Gli scripts per il training seguono la logica di quelli che mi condividesti tu.
 Il resto del materiale si trova invece sulla cartella "source".
 Troverai quindi:
 
+```
 └── uav_navigation/                              # UAV navigation workspace
     ├── scripts/
     │   └── skrl/                                # SKRL-based training scripts
@@ -21,7 +22,7 @@ Troverai quindi:
                         ├── autoencoder3D.py         # 3D-AE architecture
                         ├── uav_navigation_env.py    # Environment definition
                         └── uav_navigation_env_cfg.py # Environment configuration
-
+```
 
 I files "train_manual" e "ppo_agent" sono molto simili ai tuoi. Un cambiamento importante è, però, la presenza della GRU nell'architettura.
 I files che descrivono l'architettura delle reti presentano dei commenti pressocchè AI-generated ma sono esattamente gli stessi file usati per il ML-training.
