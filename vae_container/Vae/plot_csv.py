@@ -12,10 +12,10 @@ time axis and the script will refuse it with an explanatory message.
 
 Examples:
     python plot_csv.py run_for_thesis/lin_mae_vc.csv
-    python plot_csv.py run_for_thesis/Vae_csv/val_kl_loss_vae.csv \
-        --columns "brisk-sweep-1 - val/kl_loss" \
-        --title "Validation Results" --xlabel "Training steps" \
-        --ylabel "KL-function loss" --ema 0.9 --dpi 300
+    python plot_csv.py run_for_thesis/position_control/distance_to_goal_pc.csv \
+        --columns "playful-snowball-233 - Info / Episode_Info/final_distance_to_goal" \
+        --title "Tracking Error" --xlabel "Training steps" \
+        --ylabel "Posirion error" --ema 0.9 --dpi 300
 """
 
 import argparse

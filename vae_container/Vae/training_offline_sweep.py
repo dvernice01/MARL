@@ -272,7 +272,7 @@ def visualize(model, dataset, device, epoch, save_dir='debug_epochs'):
         for col in range(3):
             idx = indices[col]
             depth_t, coll_t, mask_t = dataset[idx]
-            recon, *_ = model(coll_t.unsqueeze(0).to(device)) # PER ADESSO LO STO TESTANDO SU DEPTH
+            recon, *_ = model(depth_t.unsqueeze(0).to(device)) # PER ADESSO LO STO TESTANDO SU DEPTH
             #recon, *_ = model(coll_t.unsqueeze(0).to(device))
             for row, arr in enumerate([
                 depth_t.squeeze().numpy(),
@@ -313,7 +313,7 @@ def run_test(model, test_loader, device, beta, use_free_bits=False):
             labels  = labels.to(device)
             masks   = masks.to(device)
 
-            recon, mean, logvar, _ = model(labels)
+            recon, mean, logvar, _ = model(inputs)
             loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta, use_free_bits=use_free_bits)
 
             test_loss       += loss.item()
@@ -411,7 +411,7 @@ def main():
         for inputs, labels, masks in train_loader:
             inputs, labels, masks = inputs.to(device), labels.to(device), masks.to(device)
             optimizer.zero_grad()
-            recon, mean, logvar, _ = model(labels)
+            recon, mean, logvar, _ = model(inputs)
             loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta, use_free_bits=use_free_bits)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -432,7 +432,7 @@ def main():
         with torch.no_grad():
             for inputs, labels, masks in val_loader:
                 inputs, labels, masks = inputs.to(device), labels.to(device), masks.to(device)
-                recon, mean, logvar, _ = model(labels)
+                recon, mean, logvar, _ = model(inputs)
                 loss, recon_l, kl_l = dce_loss(recon, labels, masks, mean, logvar, beta=beta, use_free_bits=use_free_bits)
                 val_loss  += loss.item()
                 val_recon += recon_l.item()
