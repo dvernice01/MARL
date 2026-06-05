@@ -106,6 +106,7 @@ class ae3d_config:
     use_skip           = True
     svs_max            = 0.243812
 
+<<<<<<< HEAD
 # Classe con metodi per la trasformazioni delle immagini da Depth a Collision. L'uso di cv2.Canny dovrebbe rallentare perchè funziona su CPU
 
 class CollisionImage:
@@ -121,173 +122,188 @@ class CollisionImage:
         self.H = 270
         self.W = 480
         self.MESHGRID = self.create_meshgrid(self.H, self.W, self.CX, self.CY, self.FX, self.FY)
+=======
+# class CollisionImage:
+#     def __init__(self):
+#         self.CX = 240.0
+#         self.CY = 135.0
+#         self.FX = 252.91646
+#         self.FY = 252.91646
+#         self.MAX_DEPTH = 10.0
+#         self.MIN_DEPTH = 0.2
+#         self.ROBOT_EDGE_LEN = 0.2   # Crazyflie: cube side = 2r, r = 0.1m
+#         self.OFFSET_DIST    = 0.1
+#         self.H = 270
+#         self.W = 480
+#         self.MESHGRID = self.create_meshgrid(self.H, self.W, self.CX, self.CY, self.FX, self.FY)
+>>>>>>> 281a5a0 (uav_navigation env prima di cancellare i commenti)
         
         
-    def sanitize_depth(self, depth):
-        depth = np.nan_to_num(depth.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
-        depth[depth < 0] = 0.0
-        depth[depth > self.MAX_DEPTH] = self.MAX_DEPTH
-        return depth
+#     def sanitize_depth(self, depth):
+#         depth = np.nan_to_num(depth.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+#         depth[depth < 0] = 0.0
+#         depth[depth > self.MAX_DEPTH] = self.MAX_DEPTH
+#         return depth
 
-    def create_meshgrid(self, H, W, cx, cy, fx, fy):
-        x = np.arange(0, H, dtype=np.float32)
-        y = np.arange(0, W, dtype=np.float32)
-        x, y = np.meshgrid(y, x)
-        z = np.ones((H, W), dtype=np.float32)
-        x = (x - cx) / fx
-        y = (y - cy) / fy
-        return np.stack([x, y, z], axis=0)
+#     def create_meshgrid(self, H, W, cx, cy, fx, fy):
+#         x = np.arange(0, H, dtype=np.float32)
+#         y = np.arange(0, W, dtype=np.float32)
+#         x, y = np.meshgrid(y, x)
+#         z = np.ones((H, W), dtype=np.float32)
+#         x = (x - cx) / fx
+#         y = (y - cy) / fy
+#         return np.stack([x, y, z], axis=0)
     
-    def process_image_like_author(self, image):
-        image = image.copy()
-        image[image < self.MIN_DEPTH] = -1.0  
-        image[image > self.MAX_DEPTH] = self.MAX_DEPTH
-        image = image * 0.1          # scale to [0, 1]
-        image[image < 0.0] = 0.0
-        image[image > 1.0] = 1.0
-        return image
+#     def process_image_like_author(self, image):
+#         image = image.copy()
+#         image[image < self.MIN_DEPTH] = -1.0  
+#         image[image > self.MAX_DEPTH] = self.MAX_DEPTH
+#         image = image * 0.1          # scale to [0, 1]
+#         image[image < 0.0] = 0.0
+#         image[image > 1.0] = 1.0
+#         return image
 
-    def detect_edges(self, depth_uint8, depth_float):
-        edge_image = cv2.Canny(depth_uint8, 30, 50)
-        edges_rc   = np.where(edge_image > 0)
-        edges      = np.array(list(zip(edges_rc[0], edges_rc[1])))
-        if len(edges) == 0:
-            return edges, edge_image
-        for i in range(len(edges)):
-            edge = edges[i]
-            neighbors = [
-                (max(edge[0]-1,0), edge[1]), (min(edge[0]+1,self.H-1), edge[1]),
-                (edge[0], max(0,edge[1]-1)), (edge[0], min(self.W-1,edge[1]+1)),
-                (max(edge[0]-2,0), edge[1]), (min(edge[0]+2,self.H-1), edge[1]),
-                (edge[0], max(0,edge[1]-2)), (edge[0], min(self.W-1,edge[1]+2)),
-            ]
-            min_d = depth_float[edge[0], edge[1]]
-            if min_d <= 0.0:
-                for j in neighbors:
-                    if depth_float[j[0], j[1]] > 0.0:
-                        min_d = depth_float[j[0], j[1]]
-                        edge  = j
-                        break
-            for j in neighbors:
-                if 0.1 < depth_float[j[0], j[1]] < min_d:
-                    min_d = depth_float[j[0], j[1]]
-                    edges[i] = j
-            if min_d < depth_float[edge[0], edge[1]] and depth_float[edge[0], edge[1]] > 0.1:
-                edges[i] = (0,0)
-        return edges, edge_image
+#     def detect_edges(self, depth_uint8, depth_float):
+#         edge_image = cv2.Canny(depth_uint8, 30, 50)
+#         edges_rc   = np.where(edge_image > 0)
+#         edges      = np.array(list(zip(edges_rc[0], edges_rc[1])))
+#         if len(edges) == 0:
+#             return edges, edge_image
+#         for i in range(len(edges)):
+#             edge = edges[i]
+#             neighbors = [
+#                 (max(edge[0]-1,0), edge[1]), (min(edge[0]+1,self.H-1), edge[1]),
+#                 (edge[0], max(0,edge[1]-1)), (edge[0], min(self.W-1,edge[1]+1)),
+#                 (max(edge[0]-2,0), edge[1]), (min(edge[0]+2,self.H-1), edge[1]),
+#                 (edge[0], max(0,edge[1]-2)), (edge[0], min(self.W-1,edge[1]+2)),
+#             ]
+#             min_d = depth_float[edge[0], edge[1]]
+#             if min_d <= 0.0:
+#                 for j in neighbors:
+#                     if depth_float[j[0], j[1]] > 0.0:
+#                         min_d = depth_float[j[0], j[1]]
+#                         edge  = j
+#                         break
+#             for j in neighbors:
+#                 if 0.1 < depth_float[j[0], j[1]] < min_d:
+#                     min_d = depth_float[j[0], j[1]]
+#                     edges[i] = j
+#             if min_d < depth_float[edge[0], edge[1]] and depth_float[edge[0], edge[1]] > 0.1:
+#                 edges[i] = (0,0)
+#         return edges, edge_image
 
-    def build_D_M_from_cubes(self, edges, point_cloud, depth_float,
-                            edge_length):
-        """
-        Replicates the author's create_cube_mesh + Warp ray casting without Warp.
+#     def build_D_M_from_cubes(self, edges, point_cloud, depth_float,
+#                             edge_length):
+#         """
+#         Replicates the author's create_cube_mesh + Warp ray casting without Warp.
 
-        The author places a cube of side `edge_length` at each edge point in 3D,
-        then renders a depth image of all cubes from the camera.
+#         The author places a cube of side `edge_length` at each edge point in 3D,
+#         then renders a depth image of all cubes from the camera.
 
-        We replicate this by:
-        1. Taking every 5th edge pixel (same as author: edges[::5])
-        2. Getting its 3D position from the point_cloud
-        3. Computing how large that cube appears in the image
-            (cube side in pixels = edge_length * fx / Z)
-        4. Painting a square of that size in D_M with depth value Z
-            (this is what the ray caster would return for rays hitting the cube)
+#         We replicate this by:
+#         1. Taking every 5th edge pixel (same as author: edges[::5])
+#         2. Getting its 3D position from the point_cloud
+#         3. Computing how large that cube appears in the image
+#             (cube side in pixels = edge_length * fx / Z)
+#         4. Painting a square of that size in D_M with depth value Z
+#             (this is what the ray caster would return for rays hitting the cube)
 
-        A cube projects as a square on the image plane (not a circle),
-        so we fill a square patch — no mgrid/circle needed.
-        """
-        D_M = np.full((self.H, self.W), self.MAX_DEPTH, dtype=np.float32)
+#         A cube projects as a square on the image plane (not a circle),
+#         so we fill a square patch — no mgrid/circle needed.
+#         """
+#         D_M = np.full((self.H, self.W), self.MAX_DEPTH, dtype=np.float32)
 
-        # sample every 5th edge — exact replication of author's edges[::5]
-        sampled_edges = edges[::5]
+#         # sample every 5th edge — exact replication of author's edges[::5]
+#         sampled_edges = edges[::5]
 
-        for i in range(len(sampled_edges)):
-            # pixel coordinates of this edge
-            v = int(sampled_edges[i, 0])   # row
-            u = int(sampled_edges[i, 1])   # col
+#         for i in range(len(sampled_edges)):
+#             # pixel coordinates of this edge
+#             v = int(sampled_edges[i, 0])   # row
+#             u = int(sampled_edges[i, 1])   # col
 
-            # 3D position of this edge pixel from the point cloud
-            # point_cloud shape: (3, H, W) → [x, y, z] at pixel (v, u)
-            X = point_cloud[0, v, u]
-            Y = point_cloud[1, v, u]
-            Z = point_cloud[2, v, u]   # this is the depth z of the edge point
+#             # 3D position of this edge pixel from the point cloud
+#             # point_cloud shape: (3, H, W) → [x, y, z] at pixel (v, u)
+#             X = point_cloud[0, v, u]
+#             Y = point_cloud[1, v, u]
+#             Z = point_cloud[2, v, u]   # this is the depth z of the edge point
 
-            # skip invalid points
-            if Z < self.MIN_DEPTH or not np.isfinite(Z):
-                continue
+#             # skip invalid points
+#             if Z < self.MIN_DEPTH or not np.isfinite(Z):
+#                 continue
 
-            # the cube has side edge_length in meters
-            # its half-side projected onto the image plane at depth Z:
-            #   half_side_px = (edge_length / 2) * fx / Z
-            half_px_u = int((edge_length / 2.0) * self.FX / Z)
-            half_px_v = int((edge_length / 2.0) * self.FY / Z)
+#             # the cube has side edge_length in meters
+#             # its half-side projected onto the image plane at depth Z:
+#             #   half_side_px = (edge_length / 2) * fx / Z
+#             half_px_u = int((edge_length / 2.0) * self.FX / Z)
+#             half_px_v = int((edge_length / 2.0) * self.FY / Z)
 
-            # clamp to reasonable size
-            half_px_u = max(1, min(half_px_u, 60))
-            half_px_v = max(1, min(half_px_v, 60))
+#             # clamp to reasonable size
+#             half_px_u = max(1, min(half_px_u, 60))
+#             half_px_v = max(1, min(half_px_v, 60))
 
-            # image bounds of the projected cube face
-            v0 = max(0, v - half_px_v)
-            v1 = min(self.H, v + half_px_v + 1)
-            u0 = max(0, u - half_px_u)
-            u1 = min(self.W, u + half_px_u + 1)
+#             # image bounds of the projected cube face
+#             v0 = max(0, v - half_px_v)
+#             v1 = min(self.H, v + half_px_v + 1)
+#             u0 = max(0, u - half_px_u)
+#             u1 = min(self.W, u + half_px_u + 1)
 
-            if v1 <= v0 or u1 <= u0:
-                continue
+#             if v1 <= v0 or u1 <= u0:
+#                 continue
 
-            # paint the square patch with depth Z
-            # np.minimum keeps the closest cube if two overlap
-            D_M[v0:v1, u0:u1] = np.minimum(D_M[v0:v1, u0:u1], Z)
+#             # paint the square patch with depth Z
+#             # np.minimum keeps the closest cube if two overlap
+#             D_M[v0:v1, u0:u1] = np.minimum(D_M[v0:v1, u0:u1], Z)
 
-        return D_M
+#         return D_M
 
-    def depth_to_collision_image(self,depth_raw: np.ndarray) -> np.ndarray:
-        depth = self.sanitize_depth(depth_raw)
-        if depth.ndim == 3:
-            depth = depth[:, :, 0]
-        if depth.shape != (self.H, self.W):
-            depth = cv2.resize(depth, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
-            depth = self.sanitize_depth(depth)
+#     def depth_to_collision_image(self,depth_raw: np.ndarray) -> np.ndarray:
+#         depth = self.sanitize_depth(depth_raw)
+#         if depth.ndim == 3:
+#             depth = depth[:, :, 0]
+#         if depth.shape != (self.H, self.W):
+#             depth = cv2.resize(depth, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+#             depth = self.sanitize_depth(depth)
 
-        # D_offset — equation 5
-        x = self.MESHGRID[0] * depth
-        y = self.MESHGRID[1] * depth
-        z = self.MESHGRID[2] * depth
-        range_img   = np.sqrt(x**2 + y**2 + z**2)
-        range_img   = np.nan_to_num(range_img, nan=self.MAX_DEPTH)
-        safe_inv = np.divide(self.OFFSET_DIST, range_img, 
-                     out=np.zeros_like(range_img), 
-                     where=range_img > 0)
-        z_offset = np.where(range_img > 0, (1 - safe_inv) * z, 0.0)
-        norm_offset = self.process_image_like_author(z_offset)
+#         # D_offset — equation 5
+#         x = self.MESHGRID[0] * depth
+#         y = self.MESHGRID[1] * depth
+#         z = self.MESHGRID[2] * depth
+#         range_img   = np.sqrt(x**2 + y**2 + z**2)
+#         range_img   = np.nan_to_num(range_img, nan=self.MAX_DEPTH)
+#         safe_inv = np.divide(self.OFFSET_DIST, range_img, 
+#                      out=np.zeros_like(range_img), 
+#                      where=range_img > 0)
+#         z_offset = np.where(range_img > 0, (1 - safe_inv) * z, 0.0)
+#         norm_offset = self.process_image_like_author(z_offset)
 
-        # edge detection
-        depth_uint8 = (depth / self.MAX_DEPTH * 255).astype(np.uint8)
-        edges, _    = self.detect_edges(depth_uint8, depth)
-        if len(edges) < 10:
-            return norm_offset
+#         # edge detection
+#         depth_uint8 = (depth / self.MAX_DEPTH * 255).astype(np.uint8)
+#         edges, _    = self.detect_edges(depth_uint8, depth)
+#         if len(edges) < 10:
+#             return norm_offset
 
-        # build point cloud for cube placement
-        point_cloud = np.stack([x, y, z], axis=0)   # (3, H, W)
+#         # build point cloud for cube placement
+#         point_cloud = np.stack([x, y, z], axis=0)   # (3, H, W)
 
-        # D_M — cube mesh approximation
-        D_M_raw    = self.build_D_M_from_cubes(edges, point_cloud, depth,
-                                        edge_length=self.ROBOT_EDGE_LEN)
-        norm_D_M   = self.process_image_like_author(D_M_raw)
+#         # D_M — cube mesh approximation
+#         D_M_raw    = self.build_D_M_from_cubes(edges, point_cloud, depth,
+#                                         edge_length=self.ROBOT_EDGE_LEN)
+#         norm_D_M   = self.process_image_like_author(D_M_raw)
 
-        # equation 6
-        collision  = np.minimum(norm_offset, norm_D_M)
-        collision  = np.nan_to_num(collision, nan=0.0)
-        return collision
+#         # equation 6
+#         collision  = np.minimum(norm_offset, norm_D_M)
+#         collision  = np.nan_to_num(collision, nan=0.0)
+#         return collision
 
-    def clean_state_dict(self, state_dict):
-        clean_dict = {}
-        for key, value in state_dict.items():
-            if "module." in key:
-                key = key.replace("module.", "")
-            if "dronet." in key:
-                key = key.replace("dronet.", "encoder.")
-            clean_dict[key] = value
-        return clean_dict
+#     def clean_state_dict(self, state_dict):
+#         clean_dict = {}
+#         for key, value in state_dict.items():
+#             if "module." in key:
+#                 key = key.replace("module.", "")
+#             if "dronet." in key:
+#                 key = key.replace("dronet.", "encoder.")
+#             clean_dict[key] = value
+#         return clean_dict
 
 # Classe per VAE. Sono state lasciate le funzioni modificate che lasciassere uguale il procedimento ma velocizzassero i tempi. Le altre sono commentate
 class VAEImageEncoder:
@@ -295,7 +311,7 @@ class VAEImageEncoder:
     def __init__(self, config, device="cuda:0"):
         self.config = config
         self.device = device
-        self.collision = CollisionImage()
+        #self.collision = CollisionImage()
         # GPU-resident meshgrid for the batched D_offset block of preprocess_hybrid
         self._meshgrid_torch = torch.from_numpy(self.collision.MESHGRID).float().to(device)
         self._max_depth_val = float(self.collision.MAX_DEPTH)
@@ -439,6 +455,37 @@ class VAEImageEncoder:
             edges, point_cloud, depth_clean_np,
             edge_length=self.collision.ROBOT_EDGE_LEN,
         )
+
+    def preprocess_depth(self, depth_torch: torch.Tensor) -> torch.Tensor:
+        """
+        Prepare a depth tensor for the depth-input VAE.
+
+        Mirrors the offline training preprocessing exactly:
+          - nan / +inf / -inf → 0.0           (matches np.nan_to_num used in training)
+          - clamp to [0, MAX_DEPTH]            (matches np.clip)
+          - normalise to [0, 1] by /MAX_DEPTH  (matches the division by MAX_DEPTH)
+
+        Input  : (N, H, W, 1) on self.device, float, raw camera distance_to_camera
+        Output : (N, 1, H, W) on self.device, in [0, 1]
+        """
+        if depth_torch.ndim == 4 and depth_torch.shape[-1] == 1:
+            depth = depth_torch.squeeze(-1)                  # (N, H, W)
+        else:
+            depth = depth_torch
+
+        depth = torch.nan_to_num(depth.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        depth = torch.clamp(depth, 0.0, self._max_depth_val)
+        depth = depth / self._max_depth_val                  # (N, H, W) in [0, 1]
+        depth = depth.unsqueeze(1)                           # (N, 1, H, W)
+
+        if depth.shape[-2:] != tuple(self.config.image_res):
+            depth = torch.nn.functional.interpolate(
+                depth,
+                size=self.config.image_res,
+                mode=self.config.interpolation_mode,
+            )
+        return depth
+
 
     def preprocess_hybrid(self, depth_torch: torch.Tensor) -> torch.Tensor:
         """
@@ -1167,10 +1214,9 @@ class UavNavigationEnv(DirectRLEnv):
         # (N, H, W, 1) → (N, H*W) → min over pixels → (N,)
         self._min_depth_cache = depth_clean.flatten(1).min(dim=1).values
 
-        collision = self.vae_encoder.preprocess_hybrid(depth)
-
-        # ── 2D VAE latent (depth → collision image → latent) ─────────────────
-        latent_2d = self.vae_encoder.encode(collision)            # (N, 512)
+        # ── 2D VAE latent (depth → latent, matches depth-trained DCE) ────────
+        depth_input = self.vae_encoder.preprocess_depth(depth)    # (N, 1, H, W) in [0, 1]
+        latent_2d = self.vae_encoder.encode(depth_input)          # (N, 512)
 
         # ── 3D AE: one-pass batched build of OCC, SVS, and the reward features ─
         feats = self.autoencoder3D.build_local_features_batched()
@@ -1179,83 +1225,83 @@ class UavNavigationEnv(DirectRLEnv):
         self._Nt_cache               = feats["Nt"]                         # (N,)
         latent_3d = self.autoencoder3D.encode(combined)                    # (N, latent_dim_3d)
 
-        # if self.common_step_counter % 30 == 0:
-        #     # ── 3D AE: target (preprocessed) vs reconstructed (env 0) ──────────
-        #     target = self.autoencoder3D.preprocess(combined[0:1])      # (1, 2, NZ, NY, NX)
-        #     recon  = self.autoencoder3D.decode(latent_3d[0:1])         # (1, 2, NZ, NY, NX), sigmoid-ed
-        #     target_np = target[0].detach().cpu().numpy()
-        #     recon_np  = recon[0].detach().cpu().numpy()
+        if self.common_step_counter % 30 == 0:
+            # ── 3D AE: target (preprocessed) vs reconstructed (env 0) ──────────
+            target = self.autoencoder3D.preprocess(combined[0:1])      # (1, 2, NZ, NY, NX)
+            recon  = self.autoencoder3D.decode(latent_3d[0:1])         # (1, 2, NZ, NY, NX), sigmoid-ed
+            target_np = target[0].detach().cpu().numpy()
+            recon_np  = recon[0].detach().cpu().numpy()
 
-        #     fig = plt.figure(figsize=(14, 8))
-        #     fig.suptitle(f"Step {self.common_step_counter} — env 0 local maps", fontsize=12)
+            fig = plt.figure(figsize=(14, 8))
+            fig.suptitle(f"Step {self.common_step_counter} — env 0 local maps", fontsize=12)
 
-        #     for row, (data, label) in enumerate([(target_np, "Target"), (recon_np, "Recon")]):
-        #         occ = data[0]
-        #         svs = data[1]
+            for row, (data, label) in enumerate([(target_np, "Target"), (recon_np, "Recon")]):
+                occ = data[0]
+                svs = data[1]
 
-        #         ax = fig.add_subplot(2, 2, row * 2 + 1, projection="3d")
-        #         iz, iy, ix = np.where(occ > 0.5)
-        #         if len(iz):
-        #             ax.scatter(ix, iy, iz, s=20, c="red", alpha=0.4, marker="s")
-        #         ax.set_xlim(0, occ.shape[2] - 1)
-        #         ax.set_ylim(0, occ.shape[1] - 1)
-        #         ax.set_zlim(0, occ.shape[0] - 1)
-        #         ax.set_title(f"{label} OCC ({len(iz)} voxels)")
-        #         ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
+                ax = fig.add_subplot(2, 2, row * 2 + 1, projection="3d")
+                iz, iy, ix = np.where(occ > 0.5)
+                if len(iz):
+                    ax.scatter(ix, iy, iz, s=20, c="red", alpha=0.4, marker="s")
+                ax.set_xlim(0, occ.shape[2] - 1)
+                ax.set_ylim(0, occ.shape[1] - 1)
+                ax.set_zlim(0, occ.shape[0] - 1)
+                ax.set_title(f"{label} OCC ({len(iz)} voxels)")
+                ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
 
-        #         ax2 = fig.add_subplot(2, 2, row * 2 + 2, projection="3d")
-        #         iz2, iy2, ix2 = np.where(svs > 0.15)
-        #         if len(iz2):
-        #             vals = svs[iz2, iy2, ix2]
-        #             sc = ax2.scatter(ix2, iy2, iz2, s=20, c=vals,
-        #                              cmap="viridis", alpha=0.5, marker="s",
-        #                              vmin=0.0, vmax=1.0)
-        #             fig.colorbar(sc, ax=ax2, shrink=0.5)
-        #         ax2.set_xlim(0, svs.shape[2] - 1)
-        #         ax2.set_ylim(0, svs.shape[1] - 1)
-        #         ax2.set_zlim(0, svs.shape[0] - 1)
-        #         ax2.set_title(f"{label} SVS")
-        #         ax2.set_xlabel("body x"); ax2.set_ylabel("body y"); ax2.set_zlabel("body z")
+                ax2 = fig.add_subplot(2, 2, row * 2 + 2, projection="3d")
+                iz2, iy2, ix2 = np.where(svs > 0.15)
+                if len(iz2):
+                    vals = svs[iz2, iy2, ix2]
+                    sc = ax2.scatter(ix2, iy2, iz2, s=20, c=vals,
+                                     cmap="viridis", alpha=0.5, marker="s",
+                                     vmin=0.0, vmax=1.0)
+                    fig.colorbar(sc, ax=ax2, shrink=0.5)
+                ax2.set_xlim(0, svs.shape[2] - 1)
+                ax2.set_ylim(0, svs.shape[1] - 1)
+                ax2.set_zlim(0, svs.shape[0] - 1)
+                ax2.set_title(f"{label} SVS")
+                ax2.set_xlabel("body x"); ax2.set_ylabel("body y"); ax2.set_zlabel("body z")
 
-        #     plt.tight_layout()
-        #     plt.savefig("local_maps_check.png", dpi=120, bbox_inches="tight")
-        #     plt.close()
+            plt.tight_layout()
+            plt.savefig("local_maps_check.png", dpi=120, bbox_inches="tight")
+            plt.close()
 
         
-        # if self.common_step_counter % 30 == 0:
-        #     # pos_drone  = self._robot.data.root_pos_w[0]
-        #     # quat_drone = self._robot.data.root_quat_w[0]
-        #     # pos_cam    = self.camera.data.pos_w[0]
-        #     # quat_cam   = self.camera.data.quat_w_world[0]
-        #     # env0_orig  = self._terrain.env_origins[0]
-        #     # d0 = depth[0]
-        #     # n_inf = torch.isinf(d0).sum().item()
-        #     # print(f"[step {self.common_step_counter}]")
-        #     # print(f"  env_origin    = {env0_orig.tolist()}")
-        #     # print(f"  drone pos_w   = {pos_drone.tolist()}")
-        #     # print(f"  camera pos_w  = {pos_cam.tolist()}")
-        #     # print(f"  camera quat_w = {quat_cam.tolist()}")
-        #     # print(f"  inf/total     = {n_inf}/{d0.numel()}")
-        #     # ── 2D VAE: depth → collision → recon (env 0) in one figure ────────
-        #     depth_np      = (depth[0, :, :, 0] / self.max_depth).detach().cpu().numpy()
-        #     collision_np  = collision[0, 0].detach().cpu().numpy()
-        #     recon_2d      = self.vae_encoder.decode(latent_2d[0:1])
-        #     recon_np      = recon_2d[0, 0].detach().cpu().numpy()
+        if self.common_step_counter % 30 == 0:
+            # pos_drone  = self._robot.data.root_pos_w[0]
+            # quat_drone = self._robot.data.root_quat_w[0]
+            # pos_cam    = self.camera.data.pos_w[0]
+            # quat_cam   = self.camera.data.quat_w_world[0]
+            # env0_orig  = self._terrain.env_origins[0]
+            # d0 = depth[0]
+            # n_inf = torch.isinf(d0).sum().item()
+            # print(f"[step {self.common_step_counter}]")
+            # print(f"  env_origin    = {env0_orig.tolist()}")
+            # print(f"  drone pos_w   = {pos_drone.tolist()}")
+            # print(f"  camera pos_w  = {pos_cam.tolist()}")
+            # print(f"  camera quat_w = {quat_cam.tolist()}")
+            # print(f"  inf/total     = {n_inf}/{d0.numel()}")
+            # ── 2D VAE: depth → collision → recon (env 0) in one figure ────────
+            depth_np      = (depth[0, :, :, 0] / self.max_depth).detach().cpu().numpy()
+            collision_np  = collision[0, 0].detach().cpu().numpy()
+            recon_2d      = self.vae_encoder.decode(latent_2d[0:1])
+            recon_np      = recon_2d[0, 0].detach().cpu().numpy()
 
-        #     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        #     fig.suptitle(f"Step {self.common_step_counter} — env 0 2D VAE", fontsize=12)
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            fig.suptitle(f"Step {self.common_step_counter} — env 0 2D VAE", fontsize=12)
 
-        #     titles = ["Depth (normalized)", "Collision (VAE input)", "Reconstruction"]
-        #     images = [depth_np, collision_np, recon_np]
+            titles = ["Depth (normalized)", "Collision (VAE input)", "Reconstruction"]
+            images = [depth_np, collision_np, recon_np]
 
-        #     for ax, img, title in zip(axes, images, titles):
-        #         im = ax.imshow(img, cmap="plasma", vmin=0, vmax=1)
-        #         ax.set_title(title)
-        #         ax.axis("off")
+            for ax, img, title in zip(axes, images, titles):
+                im = ax.imshow(img, cmap="plasma", vmin=0, vmax=1)
+                ax.set_title(title)
+                ax.axis("off")
 
-        #     fig.colorbar(im, ax=axes, shrink=0.7, fraction=0.02, pad=0.02)
-        #     plt.savefig("vae2d_check.png", dpi=120, bbox_inches="tight")
-        #     plt.close()
+            fig.colorbar(im, ax=axes, shrink=0.7, fraction=0.02, pad=0.02)
+            plt.savefig("vae2d_check.png", dpi=120, bbox_inches="tight")
+            plt.close()
 
         obs = torch.cat(
             [
@@ -1282,7 +1328,6 @@ class UavNavigationEnv(DirectRLEnv):
         ang_vel_sum = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
         lin_vel = 1 - torch.tanh(lin_vel_sum / 0.8)
         ang_vel = 1 - torch.tanh(ang_vel_sum / 0.8)
-        self._episode_sums["final_distance_to_goal"] += self.final_distance_to_goal * self.step_dt
         distance_to_goal_mapped = 1 - torch.tanh(self.final_distance_to_goal / 8.0)
 
         action_diff = self._actions - self._prev_actions
@@ -1355,6 +1400,12 @@ class UavNavigationEnv(DirectRLEnv):
         self._episode_sums["cells_visited"][env_ids] = (
             cells_visited_per_env * self.max_episode_length_s
         )
+
+        terminal_distance = torch.linalg.norm(
+            self._desired_pos_w[env_ids] - self._robot.data.root_pos_w[env_ids],
+            dim=1,
+        )
+        self._episode_sums["final_distance_to_goal"][env_ids] = terminal_distance * self.max_episode_length_s
 
         # ── Reset visit counts for terminated envs ────────────────────────────
         self.autoencoder3D.global_visit_counts[env_ids] = 0.0
