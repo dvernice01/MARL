@@ -51,16 +51,10 @@ wandb.login()
 
 project = "uav_navigation"
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
-LOCAL_MAPS_SAVE_DIR = "/workspace/environment/uav_navigation/outputs/local_maps_uav_navigation"  # where to save local maps; set to None to disable
-LOCAL_MAP_SAVE_EVERY = 1000   # steps between saves; set to 0 to disable
 LOCAL_NZ = 8                  # local map depth  (z axis)
 LOCAL_NY = 16                 # local map height (y axis)
 LOCAL_NX = 16                 # local map width  (x axis)
-MIN_ALIVE_STEPS_TO_SAVE = 0   # consecutive alive steps required before saving a map
-LOCAL_MAP_START_STEP = 0
 LOCAL_CELL_SIZE = 0.25
-ONLINE_OCC_VIZ_EVERY = 500    # steps between online-OCC sanity plots; 0 to disable
 
 # Policy Architecture per Velocity controller
 class PolicyNet(torch.nn.Module):
@@ -83,7 +77,7 @@ class vae_config:
     latent_dims = 512
     #032824
     model_file = (
-        "/workspace/vae_container/Vae/runs/ana31c16/youthful-sweep-1/checkpoints/vae_best_20260605_102001.pt"
+        "/workspace/vae_container/Vae/runs/l7dd58vd/mild-sweep-1/checkpoints/vae_best_20260606_063918.pt"
     )
     model_folder = "/workspace/vae_container/Vae/checkpoint"
     image_res = (270, 480)
@@ -91,7 +85,6 @@ class vae_config:
     return_sampled_latent = False
 
 class ae3d_config:
-
     use_ae3d = True
     latent_dim = 192                
     model_file = (
@@ -106,7 +99,7 @@ class ae3d_config:
     use_skip           = True
     svs_max            = 0.243812
 
-# Classe per VAE. Sono state lasciate le funzioni modificate che lasciassere uguale il procedimento ma velocizzassero i tempi. Le altre sono commentate
+# Classe per VAE. 
 class VAEImageEncoder:
 
     def __init__(self, config, device="cuda:0"):
@@ -123,24 +116,17 @@ class VAEImageEncoder:
             num_deconv_layers  = 7,
             residual_every     = 2,
             use_skip           = True,
-            #decoder_num_dense = cfg.decoder_num_dense,
         ).to(device)
-    # combine module path with model file name
+        # combine module path with model file name
         weight_file_path = self.config.model_file
-        # load model weights
-        #print("Loading weights from file: ", weight_file_path)
-        state_dict = self.clean_state_dict(torch.load(weight_file_path))
+        state_dict = self.clean_state_dict(torch.load(weight_file_path, map_location=self.device))
         for k, v in state_dict.items():
             print(f"{k}: {v.shape}")
         missing, unexpected = self.vae_model.load_state_dict(state_dict, strict=False)
-        #print(state_dict.keys())
-        #print("Missing keys:   ", missing)
-        #print("Unexpected keys:", unexpected)
         core_keys = [k for k in missing if "conv" in k or "dense0" in k]
         if core_keys:
             raise RuntimeError(f"Core architecture mismatch: {core_keys}")
         self.vae_model.eval()
-        self.max_depth = 10.0
 
     def clean_state_dict(self, state_dict):
         clean_dict = {}
@@ -157,8 +143,7 @@ class VAEImageEncoder:
         Class to encode the set of images to a latent space. We can return both the means and sampled latent space variables.
         """
         with torch.no_grad():
-            # need to squeeze 0th dimension and unsqueeze 1st dimension to make it work with the VAE
-            #image_tensors = image_tensors.squeeze(0).unsqueeze(1)
+
             if image_tensors.ndim == 4:  # (N, 1, H, W)
                 pass
             elif image_tensors.ndim == 3:  # (N, H, W)
@@ -176,13 +161,11 @@ class VAEImageEncoder:
                 )
             else:
                 interpolated_image = image_tensors
-            #interpolated_image = interpolated_image.float()
             z_sampled, means, log_var = self.vae_model.encode(interpolated_image)
             n_clipped = ((log_var < -10) | (log_var > 4)).sum().item()
             if n_clipped > 0:
                 print(f"WARNING: {n_clipped} log_var values were clamped")
-            # print("means  min/max:", means.min().item(), means.max().item())
-            # print("z_samp min/max:", z_sampled.min().item(), z_sampled.max().item())
+
         if self.config.return_sampled_latent:
             returned_val = z_sampled
         else:
@@ -214,16 +197,21 @@ class VAEImageEncoder:
         Input  : (N, H, W, 1) on self.device, float, raw camera distance_to_camera
         Output : (N, 1, H, W) on self.device, in [0, 1]
         """
+        # Controllo la forma del tensore di ingresso. Dopo l'if deve essere (N, H, W). 
         if depth_torch.ndim == 4 and depth_torch.shape[-1] == 1:
             depth = depth_torch.squeeze(-1)                  # (N, H, W)
         else:
             depth = depth_torch
 
-        depth = torch.nan_to_num(depth.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        # Adesso posso normalizzare i valori con la stessa logica del training.
+        depth = torch.nan_to_num(depth.float(), nan=self._max_depth_val,
+                                 posinf=self._max_depth_val, neginf=self._max_depth_val)
+
         depth = torch.clamp(depth, 0.0, self._max_depth_val)
         depth = depth / self._max_depth_val                  # (N, H, W) in [0, 1]
         depth = depth.unsqueeze(1)                           # (N, 1, H, W)
-
+        
+        # Controllo che H e W siano quelli attesi.
         if depth.shape[-2:] != tuple(self.config.image_res):
             depth = torch.nn.functional.interpolate(
                 depth,
@@ -232,43 +220,13 @@ class VAEImageEncoder:
             )
         return depth
 
-# Classe per 3D autoencoder. Vale la stessa cosa del VAE quindi le funzioni commentate sono quelle che rallentavano.
+# Classe per 3D autoencoder.
 
 class autoencoder_3d:
-    """
-    Merged module: persistent online OCC + visit-count buffers PLUS the
-    trained 3D AE encoder. Owns the buffers and exposes
-    encode()/decode() for the policy observation.
-    """
-
     def __init__(self, env, config=ae3d_config):
         self.env = env
         self.config = config
         self.device = env.device
-
-        # ── Trained 3D AE ──────────────────────────────────────────────────
-        self.model = VAE3D(
-            input_dim         = 2,
-            latent_dim        = config.latent_dim,
-            with_logits       = True,
-            inference_mode    = True,
-            num_conv_layers   = config.num_conv_layers,
-            use_residual      = config.use_residual,
-            residual_every    = config.residual_every,
-            num_deconv_layers = config.num_deconv_layers,
-            use_skip          = config.use_skip,
-        ).to(self.device)
-
-        print(f"[AE3D] Loading weights from {config.model_file}")
-        state_dict = torch.load(config.model_file, map_location=self.device)
-        clean = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        missing, unexpected = self.model.load_state_dict(clean, strict=False)
-        #print(f"[AE3D] Missing keys:    {missing}")
-        #print(f"[AE3D] Unexpected keys: {unexpected}")
-        core = [k for k in missing if "conv" in k or "dense" in k]
-        if core:
-            raise RuntimeError(f"3D AE state_dict mismatch on core layers: {core}")
-        self.model.eval()
 
         # ── Geometry of the global grids ───────────────────────────────────
         self.occ_cell_size = float(env.cfg.occ_cell_size)
@@ -276,6 +234,7 @@ class autoencoder_3d:
             [env.x_min, env.y_min, env.z_min],
             dtype=torch.float32, device=self.device,
         )
+        # Sto dividendo l'ambiente in celle
         self.NX = int(math.ceil((env.x_max - env.x_min) / self.occ_cell_size))
         self.NY = int(math.ceil((env.y_max - env.y_min) / self.occ_cell_size))
         self.NZ = int(math.ceil((env.z_max - env.z_min) / self.occ_cell_size))
@@ -295,18 +254,47 @@ class autoencoder_3d:
         )
 
         # ── Local map shape ────────────────────────────────────────────────
+        # Larghezza
         self.local_nz = LOCAL_NZ
         self.local_ny = LOCAL_NY
         self.local_nx = LOCAL_NX
-        self.local_hz = LOCAL_NZ // 2
+        # Altezza
+        self.local_hz = LOCAL_NZ // 2 
         self.local_hy = LOCAL_NY // 2
         self.local_hx = LOCAL_NX // 2
+
+        # ── Trained 3D AE ──────────────────────────────────────────────────
+        self.model = VAE3D(
+            input_dim         = 2,
+            latent_dim        = config.latent_dim,
+            with_logits       = True, # Usato solo su decoder, quindi ininfluente.
+            inference_mode    = True,
+            num_conv_layers   = config.num_conv_layers,
+            use_residual      = config.use_residual,
+            residual_every    = config.residual_every,
+            num_deconv_layers = config.num_deconv_layers,
+            use_skip          = config.use_skip,
+        ).to(self.device)
+
+        print(f"[AE3D] Loading weights from {config.model_file}")
+        state_dict = torch.load(config.model_file, map_location=self.device)
+        clean = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        missing, unexpected = self.model.load_state_dict(clean, strict=False)
+        #print(f"[AE3D] Missing keys:    {missing}")
+        #print(f"[AE3D] Unexpected keys: {unexpected}")
+        core = [k for k in missing if "conv" in k or "dense" in k]
+        if core:
+            raise RuntimeError(f"3D AE state_dict mismatch on core layers: {core}")
+        self.model.eval()
+
 
     # ── AE3D interface (preprocess / encode / decode / latent dim) ────────────
     def preprocess(self, combined: torch.Tensor) -> torch.Tensor:
         out = combined.clone().float()
         out[:, 0] = torch.clamp(out[:, 0], 0.0, 1.0)
         out[:, 1] = torch.clamp(out[:, 1], 0.0, None)
+        # Anche se nel trainig svs_max = 1.0 , se non è mai stato raggiunto allora devo normalizzare.
+        # self.config.svs_max è stato preso dalla simulazione.
         if self.config.svs_max > 0:
             out[:, 1] = out[:, 1] / self.config.svs_max
         out[:, 1] = torch.clamp(out[:, 1], 0.0, 1.0)
@@ -325,98 +313,95 @@ class autoencoder_3d:
         with torch.no_grad():
             return torch.sigmoid(self.model.decode(latent))
 
-    # def get_latent_dim(self) -> int:
-    #     return self.config.latent_dim
+    # # ── Body-frame local OCC (crop of persistent global_occ_map) ──────────────
+    # def _build_local_occ_map(self, env_id: int) -> torch.Tensor:
+    #     env = self.env
+    #     cell = self.occ_cell_size
+    #     NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
+    #     NZ, NY, NX = self.occ_map_dims
 
-    # ── Body-frame local OCC (crop of persistent global_occ_map) ──────────────
-    def _build_local_occ_map(self, env_id: int) -> torch.Tensor:
-        env = self.env
-        cell = self.occ_cell_size
-        NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
-        NZ, NY, NX = self.occ_map_dims
+    #     xs = (torch.arange(NXL, device=env.device).float() - self.local_hx + 0.5) * cell # generates the x-coordinates (in metres, body frame) of the voxel centres along the local map's x-axis.
+    #     ys = (torch.arange(NYL, device=env.device).float() - self.local_hy + 0.5) * cell
+    #     zs = (torch.arange(NZL, device=env.device).float() - self.local_hz + 0.5) * cell
+    #     grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
+    #     pos_body = torch.stack([grid_x, grid_y, grid_z], dim=-1)
+    #     flat_body = pos_body.reshape(-1, 3)
 
-        xs = (torch.arange(NXL, device=env.device).float() - self.local_hx + 0.5) * cell # generates the x-coordinates (in metres, body frame) of the voxel centres along the local map's x-axis.
-        ys = (torch.arange(NYL, device=env.device).float() - self.local_hy + 0.5) * cell
-        zs = (torch.arange(NZL, device=env.device).float() - self.local_hz + 0.5) * cell
-        grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
-        pos_body = torch.stack([grid_x, grid_y, grid_z], dim=-1)
-        flat_body = pos_body.reshape(-1, 3)
+    #     drone_pos_w = env._robot.data.root_pos_w[env_id]
+    #     drone_quat_w = env._robot.data.root_quat_w[env_id]
+    #     yaw_quat = math_utils.yaw_quat(drone_quat_w.unsqueeze(0)).squeeze(0)
+    #     yaw_exp = yaw_quat.unsqueeze(0).expand(flat_body.shape[0], -1)
+    #     flat_world = quat_apply(yaw_exp, flat_body) + drone_pos_w
+    #     env_origin_xy = env._terrain.env_origins[env_id, :2]
+    #     flat_world[:, :2] -= env_origin_xy
 
-        drone_pos_w = env._robot.data.root_pos_w[env_id]
-        drone_quat_w = env._robot.data.root_quat_w[env_id]
-        yaw_quat = math_utils.yaw_quat(drone_quat_w.unsqueeze(0)).squeeze(0)
-        yaw_exp = yaw_quat.unsqueeze(0).expand(flat_body.shape[0], -1)
-        flat_world = quat_apply(yaw_exp, flat_body) + drone_pos_w
-        env_origin_xy = env._terrain.env_origins[env_id, :2]
-        flat_world[:, :2] -= env_origin_xy
+    #     ix = ((flat_world[:, 0] - self.occ_origin[0]) / cell).long() # converts a continuous warehouse-local position in metres back into a discrete voxel index along the global grid's x-axis.
+    #     iy = ((flat_world[:, 1] - self.occ_origin[1]) / cell).long()
+    #     iz = ((flat_world[:, 2] - self.occ_origin[2]) / cell).long()
+    #     in_bounds = (
+    #         (ix >= 0) & (ix < NX) &
+    #         (iy >= 0) & (iy < NY) &
+    #         (iz >= 0) & (iz < NZ)
+    #     )
 
-        ix = ((flat_world[:, 0] - self.occ_origin[0]) / cell).long() # converts a continuous warehouse-local position in metres back into a discrete voxel index along the global grid's x-axis.
-        iy = ((flat_world[:, 1] - self.occ_origin[1]) / cell).long()
-        iz = ((flat_world[:, 2] - self.occ_origin[2]) / cell).long()
-        in_bounds = (
-            (ix >= 0) & (ix < NX) &
-            (iy >= 0) & (iy < NY) &
-            (iz >= 0) & (iz < NZ)
-        )
+    #     local_flat = torch.zeros((flat_world.shape[0],), dtype=torch.float32, device=env.device)
+    #     if in_bounds.any():
+    #         local_flat[in_bounds] = self.global_occ_map[
+    #             env_id, iz[in_bounds], iy[in_bounds], ix[in_bounds]
+    #         ].float()
+    #     return local_flat.reshape(NZL, NYL, NXL)
 
-        local_flat = torch.zeros((flat_world.shape[0],), dtype=torch.float32, device=env.device)
-        if in_bounds.any():
-            local_flat[in_bounds] = self.global_occ_map[
-                env_id, iz[in_bounds], iy[in_bounds], ix[in_bounds]
-            ].float()
-        return local_flat.reshape(NZL, NYL, NXL)
+    # # ── Body-frame local SVS (inverse-warp of global_visit_counts) ────────────
+    # def _build_local_svs_map(
+    #     self, env_id: int, local_occ=None, return_counts: bool = False
+    # ) -> torch.Tensor:
+    #     env = self.env
+    #     cell = self.occ_cell_size
+    #     NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
+    #     NZ, NY, NX = self.occ_map_dims
 
-    # ── Body-frame local SVS (inverse-warp of global_visit_counts) ────────────
-    def _build_local_svs_map(
-        self, env_id: int, local_occ=None, return_counts: bool = False
-    ) -> torch.Tensor:
-        env = self.env
-        cell = self.occ_cell_size
-        NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
-        NZ, NY, NX = self.occ_map_dims
+    #     xs = (torch.arange(NXL, device=env.device).float() - self.local_hx + 0.5) * cell
+    #     ys = (torch.arange(NYL, device=env.device).float() - self.local_hy + 0.5) * cell
+    #     zs = (torch.arange(NZL, device=env.device).float() - self.local_hz + 0.5) * cell
+    #     grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
+    #     pos_body = torch.stack([grid_x, grid_y, grid_z], dim=-1)
+    #     flat_body = pos_body.reshape(-1, 3)
 
-        xs = (torch.arange(NXL, device=env.device).float() - self.local_hx + 0.5) * cell
-        ys = (torch.arange(NYL, device=env.device).float() - self.local_hy + 0.5) * cell
-        zs = (torch.arange(NZL, device=env.device).float() - self.local_hz + 0.5) * cell
-        grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
-        pos_body = torch.stack([grid_x, grid_y, grid_z], dim=-1)
-        flat_body = pos_body.reshape(-1, 3)
+    #     drone_pos_w = env._robot.data.root_pos_w[env_id]
+    #     drone_quat_w = env._robot.data.root_quat_w[env_id]
+    #     yaw_quat = math_utils.yaw_quat(drone_quat_w.unsqueeze(0)).squeeze(0)
+    #     yaw_exp = yaw_quat.unsqueeze(0).expand(flat_body.shape[0], -1)
+    #     env_origin_xy = env._terrain.env_origins[env_id, :2]
+    #     flat_world = quat_apply(yaw_exp, flat_body) + drone_pos_w
+    #     flat_world[:, :2] -= env_origin_xy
 
-        drone_pos_w = env._robot.data.root_pos_w[env_id]
-        drone_quat_w = env._robot.data.root_quat_w[env_id]
-        yaw_quat = math_utils.yaw_quat(drone_quat_w.unsqueeze(0)).squeeze(0)
-        yaw_exp = yaw_quat.unsqueeze(0).expand(flat_body.shape[0], -1)
-        env_origin_xy = env._terrain.env_origins[env_id, :2]
-        flat_world = quat_apply(yaw_exp, flat_body) + drone_pos_w
-        flat_world[:, :2] -= env_origin_xy
+    #     ix = ((flat_world[:, 0] - self.occ_origin[0]) / cell).long()
+    #     iy = ((flat_world[:, 1] - self.occ_origin[1]) / cell).long()
+    #     iz = ((flat_world[:, 2] - self.occ_origin[2]) / cell).long()
+    #     in_bounds = (
+    #         (ix >= 0) & (ix < NX) &
+    #         (iy >= 0) & (iy < NY) &
+    #         (iz >= 0) & (iz < NZ)
+    #     )
 
-        ix = ((flat_world[:, 0] - self.occ_origin[0]) / cell).long()
-        iy = ((flat_world[:, 1] - self.occ_origin[1]) / cell).long()
-        iz = ((flat_world[:, 2] - self.occ_origin[2]) / cell).long()
-        in_bounds = (
-            (ix >= 0) & (ix < NX) &
-            (iy >= 0) & (iy < NY) &
-            (iz >= 0) & (iz < NZ)
-        )
+    #     counts_flat = torch.zeros((flat_world.shape[0],), dtype=torch.float32, device=env.device)
+    #     if in_bounds.any():
+    #         counts_flat[in_bounds] = self.global_visit_counts[
+    #             env_id, iz[in_bounds], iy[in_bounds], ix[in_bounds]
+    #         ]
+    #     counts = counts_flat.reshape(NZL, NYL, NXL)
 
-        counts_flat = torch.zeros((flat_world.shape[0],), dtype=torch.float32, device=env.device)
-        if in_bounds.any():
-            counts_flat[in_bounds] = self.global_visit_counts[
-                env_id, iz[in_bounds], iy[in_bounds], ix[in_bounds]
-            ]
-        counts = counts_flat.reshape(NZL, NYL, NXL)
-
-        Nt = counts.sum()
-        svs = torch.zeros_like(counts)
-        if Nt > 0:
-            p = counts / Nt
-            svs = torch.where(p > 0, -p * torch.log(p), svs)
-            if local_occ is None:
-                local_occ = self._build_local_occ_map(env_id)
-            svs[local_occ > 0.5] = 0.0
-        if return_counts:
-            return svs, counts
-        return svs
+    #     Nt = counts.sum()
+    #     svs = torch.zeros_like(counts)
+    #     if Nt > 0:
+    #         p = counts / Nt
+    #         svs = torch.where(p > 0, -p * torch.log(p), svs)
+    #         if local_occ is None:
+    #             local_occ = self._build_local_occ_map(env_id)
+    #         svs[local_occ > 0.5] = 0.0
+    #     if return_counts:
+    #         return svs, counts
+    #     return svs
 
     # def build_local_features(self, env_id: int) -> dict:
     #     """
@@ -458,7 +443,7 @@ class autoencoder_3d:
 
     def build_local_features_batched(self) -> dict:
         """
-        Batched equivalent of build_local_features over all envs.
+        Build local SVS + OCC maps. Moreover, compute the distance-to-obstacle reward and the visit counts
         Returns:
           'combined':         (N, 2, NZL, NYL, NXL)  channel 0 OCC, channel 1 SVS
           'local_occ':        (N, NZL, NYL, NXL)    binary
@@ -467,17 +452,18 @@ class autoencoder_3d:
         """
         env = self.env
         cell = self.occ_cell_size
-        NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
-        NZ, NY, NX = self.occ_map_dims
+        NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx     # numero di celle nella singla cella
+        NZ, NY, NX = self.occ_map_dims                                  # numero di celle nell'env
         N = env.num_envs
 
         # Body-frame grid (shared across envs)
-        xs = (torch.arange(NXL, device=env.device).float() - self.local_hx + 0.5) * cell
+        # Corrispondente in metri della cella a partire dla drone in pratica va da -2 a +2 in larghezza e da -1 a +1 in altezza
+        xs = (torch.arange(NXL, device=env.device).float() - self.local_hx + 0.5) * cell 
         ys = (torch.arange(NYL, device=env.device).float() - self.local_hy + 0.5) * cell
         zs = (torch.arange(NZL, device=env.device).float() - self.local_hz + 0.5) * cell
         grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
         flat_body = torch.stack([grid_x, grid_y, grid_z], dim=-1).reshape(-1, 3)   # (M, 3)
-        M = flat_body.shape[0]
+        M = flat_body.shape[0] # numero totale di voxel ->  M = 8 × 16 × 16 = 2048
 
         # Per-env transforms
         drone_pos_w = env._robot.data.root_pos_w                                   # (N, 3)
@@ -486,11 +472,13 @@ class autoencoder_3d:
 
         yaw_flat = yaw_quat.unsqueeze(1).expand(-1, M, -1).reshape(-1, 4)          # (N*M, 4)
         body_flat = flat_body.unsqueeze(0).expand(N, -1, -1).reshape(-1, 3)        # (N*M, 3)
+        # Le mappe sono allineate in yaw poi aggiungo le coordinate del drone in world per ottenere le coordinate globali dei voxel.
         world_flat = quat_apply(yaw_flat, body_flat).reshape(N, M, 3)              # (N, M, 3)
         world_flat = world_flat + drone_pos_w.unsqueeze(1)
 
         # Shared-warehouse: index global grids by world coordinates directly.
-        ix = ((world_flat[:, :, 0] - self.occ_origin[0]) / cell).long()
+        # processo inverso, passo da metri a indice di cella
+        ix = ((world_flat[:, :, 0] - self.occ_origin[0]) / cell).long() 
         iy = ((world_flat[:, :, 1] - self.occ_origin[1]) / cell).long()
         iz = ((world_flat[:, :, 2] - self.occ_origin[2]) / cell).long()
 
@@ -506,6 +494,7 @@ class autoencoder_3d:
 
         env_idx = torch.arange(N, device=env.device).unsqueeze(1).expand(-1, M)    # (N, M)
 
+        # Alla fine local_occ è una mappa 8x16x16 con 1 se c'è l'ostacolo e 0 altrimenti
         occ_flat = self.global_occ_map[env_idx, iz_c, iy_c, ix_c].float()
         occ_flat = occ_flat * in_bounds.float()
         local_occ = occ_flat.reshape(N, NZL, NYL, NXL)
@@ -629,6 +618,8 @@ class UavNavigationEnv(DirectRLEnv):
 
     def __init__(self, cfg: UavNavigationEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+        print(f"[UavNavigationEnv] self.device = {self.device}")
+        print(f"[UavNavigationEnv] self.sim.cfg.device = {self.sim.cfg.device}")
 
         self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self.low_level_actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
@@ -674,8 +665,6 @@ class UavNavigationEnv(DirectRLEnv):
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
-        #self.set_debug_vis(self.cfg.debug_vis)
-
         self.distance_to_bounds_x = torch.zeros(self.num_envs, device=self.device)
         self.distance_to_bounds_y = torch.zeros(self.num_envs, device=self.device)
         self.final_distance_to_goal_b = torch.zeros(self.num_envs, device=self.device)
@@ -690,25 +679,22 @@ class UavNavigationEnv(DirectRLEnv):
         # ── Cached perception features used by _get_rewards / _get_dones ─────
         # Default to a large value so step 0 doesn't false-positive a collision.
         _local_half_extent = (LOCAL_NX // 2) * LOCAL_CELL_SIZE
+        # La distanza al primo ostacolo è già massima, altrimenti sarebbe già in collisione.
         self._dist_to_obstacle_cache = torch.full(
             (self.num_envs,), _local_half_extent, device=self.device,
         )
         self._Nt_cache = torch.zeros(self.num_envs, device=self.device)
 
         self.vae_encoder = VAEImageEncoder(vae_config, device=self.device)
-        self.max_depth = 10.0  
+        self.max_depth = self.vae_encoder._max_depth_val 
+        # Minimo valore di profondità 
         self._min_depth_cache = torch.full(
             (self.num_envs,),
             float(self.cfg.camera.spawn.clipping_range[1]),
             device=self.device,
         )
-
         # 3D occupancy / SVS map builder — owns global_occ_map & global_visit_counts
         self.autoencoder3D = autoencoder_3d(self)
-
-        os.makedirs(LOCAL_MAPS_SAVE_DIR, exist_ok=True)
-        print(f"[LocalMap] Online OCC: shape={self.autoencoder3D.occ_map_dims}, "
-              f"cell={self.autoencoder3D.occ_cell_size} m")
 
 
     def _load_policy_network(self):
@@ -802,7 +788,7 @@ class UavNavigationEnv(DirectRLEnv):
         is_alive = (
             self.distance_to_bounds_x &
             self.distance_to_bounds_y &
-            (pos_w[:, 2] > self.z_min) & (pos_w[:, 2] < self.z_max)
+            (pos_w[:, 2] > self.z_min + 0.3) & (pos_w[:, 2] < self.z_max - 0.3)
         )
         self.alive_steps[is_alive]  += 1
         self.alive_steps[~is_alive] = 0
@@ -832,70 +818,70 @@ class UavNavigationEnv(DirectRLEnv):
         self._Nt_cache               = feats["Nt"]                         # (N,)
         latent_3d = self.autoencoder3D.encode(combined)                    # (N, latent_dim_3d)
 
-        if self.common_step_counter % 30 == 0:
-            # ── 3D AE: target (preprocessed) vs reconstructed (env 0) ──────────
-            target = self.autoencoder3D.preprocess(combined[0:1])      # (1, 2, NZ, NY, NX)
-            recon  = self.autoencoder3D.decode(latent_3d[0:1])         # (1, 2, NZ, NY, NX), sigmoid-ed
-            target_np = target[0].detach().cpu().numpy()
-            recon_np  = recon[0].detach().cpu().numpy()
+        # if self.common_step_counter % 30 == 0:
+        #     # ── 3D AE: target (preprocessed) vs reconstructed (env 0) ──────────
+        #     target = self.autoencoder3D.preprocess(combined[0:1])      # (1, 2, NZ, NY, NX)
+        #     recon  = self.autoencoder3D.decode(latent_3d[0:1])         # (1, 2, NZ, NY, NX), sigmoid-ed
+        #     target_np = target[0].detach().cpu().numpy()
+        #     recon_np  = recon[0].detach().cpu().numpy()
 
-            fig = plt.figure(figsize=(14, 8))
-            fig.suptitle(f"Step {self.common_step_counter} — env 0 local maps", fontsize=12)
+        #     fig = plt.figure(figsize=(14, 8))
+        #     fig.suptitle(f"Step {self.common_step_counter} — env 0 local maps", fontsize=12)
 
-            for row, (data, label) in enumerate([(target_np, "Target"), (recon_np, "Recon")]):
-                occ = data[0]
-                svs = data[1]
+        #     for row, (data, label) in enumerate([(target_np, "Target"), (recon_np, "Recon")]):
+        #         occ = data[0]
+        #         svs = data[1]
 
-                ax = fig.add_subplot(2, 2, row * 2 + 1, projection="3d")
-                iz, iy, ix = np.where(occ > 0.5)
-                if len(iz):
-                    ax.scatter(ix, iy, iz, s=20, c="red", alpha=0.4, marker="s")
-                ax.set_xlim(0, occ.shape[2] - 1)
-                ax.set_ylim(0, occ.shape[1] - 1)
-                ax.set_zlim(0, occ.shape[0] - 1)
-                ax.set_title(f"{label} OCC ({len(iz)} voxels)")
-                ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
+        #         ax = fig.add_subplot(2, 2, row * 2 + 1, projection="3d")
+        #         iz, iy, ix = np.where(occ > 0.5)
+        #         if len(iz):
+        #             ax.scatter(ix, iy, iz, s=20, c="red", alpha=0.4, marker="s")
+        #         ax.set_xlim(0, occ.shape[2] - 1)
+        #         ax.set_ylim(0, occ.shape[1] - 1)
+        #         ax.set_zlim(0, occ.shape[0] - 1)
+        #         ax.set_title(f"{label} OCC ({len(iz)} voxels)")
+        #         ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
 
-                ax2 = fig.add_subplot(2, 2, row * 2 + 2, projection="3d")
-                iz2, iy2, ix2 = np.where(svs > 0.15)
-                if len(iz2):
-                    vals = svs[iz2, iy2, ix2]
-                    sc = ax2.scatter(ix2, iy2, iz2, s=20, c=vals,
-                                     cmap="viridis", alpha=0.5, marker="s",
-                                     vmin=0.0, vmax=1.0)
-                    fig.colorbar(sc, ax=ax2, shrink=0.5)
-                ax2.set_xlim(0, svs.shape[2] - 1)
-                ax2.set_ylim(0, svs.shape[1] - 1)
-                ax2.set_zlim(0, svs.shape[0] - 1)
-                ax2.set_title(f"{label} SVS")
-                ax2.set_xlabel("body x"); ax2.set_ylabel("body y"); ax2.set_zlabel("body z")
+        #         ax2 = fig.add_subplot(2, 2, row * 2 + 2, projection="3d")
+        #         iz2, iy2, ix2 = np.where(svs > 0.15)
+        #         if len(iz2):
+        #             vals = svs[iz2, iy2, ix2]
+        #             sc = ax2.scatter(ix2, iy2, iz2, s=20, c=vals,
+        #                              cmap="viridis", alpha=0.5, marker="s",
+        #                              vmin=0.0, vmax=1.0)
+        #             fig.colorbar(sc, ax=ax2, shrink=0.5)
+        #         ax2.set_xlim(0, svs.shape[2] - 1)
+        #         ax2.set_ylim(0, svs.shape[1] - 1)
+        #         ax2.set_zlim(0, svs.shape[0] - 1)
+        #         ax2.set_title(f"{label} SVS")
+        #         ax2.set_xlabel("body x"); ax2.set_ylabel("body y"); ax2.set_zlabel("body z")
 
-            plt.tight_layout()
-            plt.savefig("local_maps_check.png", dpi=120, bbox_inches="tight")
-            plt.close()
+        #     plt.tight_layout()
+        #     plt.savefig("local_maps_check.png", dpi=120, bbox_inches="tight")
+        #     plt.close()
 
         
-        if self.common_step_counter % 30 == 0:
-            # ── 2D VAE: depth → VAE input → recon (env 0) in one figure ────────
-            depth_np      = (depth[0, :, :, 0] / self.max_depth).detach().cpu().numpy()
-            vae_input_np  = depth_input[0, 0].detach().cpu().numpy()
-            recon_2d      = self.vae_encoder.decode(latent_2d[0:1])
-            recon_np      = recon_2d[0, 0].detach().cpu().numpy()
+        # if self.common_step_counter % 30 == 0:
+        #     # ── 2D VAE: depth → VAE input → recon (env 0) in one figure ────────
+        #     depth_np      = (depth[0, :, :, 0] / self.max_depth).detach().cpu().numpy()
+        #     vae_input_np  = depth_input[0, 0].detach().cpu().numpy()
+        #     recon_2d      = self.vae_encoder.decode(latent_2d[0:1])
+        #     recon_np      = recon_2d[0, 0].detach().cpu().numpy()
 
-            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-            fig.suptitle(f"Step {self.common_step_counter} — env 0 2D VAE", fontsize=12)
+        #     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        #     fig.suptitle(f"Step {self.common_step_counter} — env 0 2D VAE", fontsize=12)
 
-            titles = ["Depth (normalized)", "VAE input (depth)", "Reconstruction"]
-            images = [depth_np, vae_input_np, recon_np]
+        #     titles = ["Depth (normalized)", "VAE input (depth)", "Reconstruction"]
+        #     images = [depth_np, vae_input_np, recon_np]
 
-            for ax, img, title in zip(axes, images, titles):
-                im = ax.imshow(img, cmap="plasma", vmin=0, vmax=1)
-                ax.set_title(title)
-                ax.axis("off")
+        #     for ax, img, title in zip(axes, images, titles):
+        #         im = ax.imshow(img, cmap="plasma", vmin=0, vmax=1)
+        #         ax.set_title(title)
+        #         ax.axis("off")
 
-            fig.colorbar(im, ax=axes, shrink=0.7, fraction=0.02, pad=0.02)
-            plt.savefig("vae2d_check.png", dpi=120, bbox_inches="tight")
-            plt.close()
+        #     fig.colorbar(im, ax=axes, shrink=0.7, fraction=0.02, pad=0.02)
+        #     plt.savefig("vae2d_check.png", dpi=120, bbox_inches="tight")
+        #     plt.close()
 
         obs = torch.cat(
             [
@@ -963,8 +949,8 @@ class UavNavigationEnv(DirectRLEnv):
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
         out_of_bounds = (
-            (self._robot.data.root_pos_w[:, 2] < self.z_min) |
-            (self._robot.data.root_pos_w[:, 2] > self.z_max) |
+            (self._robot.data.root_pos_w[:, 2] < self.z_min + 0.3) |
+            (self._robot.data.root_pos_w[:, 2] > self.z_max - 0.3) |
             (~self.distance_to_bounds_x.bool()) |
             (~self.distance_to_bounds_y.bool())
         )
