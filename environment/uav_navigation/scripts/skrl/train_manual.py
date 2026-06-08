@@ -138,8 +138,11 @@ def main(env_cfg, agent_cfg: dict):
 
     # ── 1. Init wandb FIRST so sweep config is available ──────────────
     run = wandb.init(
-        project="uav_navigation",
         sync_tensorboard=True,
+        resume="allow",
+        entity="damianovernice01-politecnico-di-bari",
+        project="uav_navigation",
+        id="robust-pond-56",
     )
     sweep_cfg = wandb.config  # sweep controller injects values here
 
