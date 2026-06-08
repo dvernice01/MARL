@@ -4,10 +4,15 @@
 
 # DOCKER SECTION
 Innanzitutto bisogna entrare nella cartella IsaacLab_reduced e runnare il seguente comando:
+
     - docker pull nvcr.io/nvidia/isaac-lab:2.3.2 
+
 Fatto ciò, si rende il run-file eseguibile con
+
     - chmod +x run.sh
+
 e si runni il file con 
+
     - ./run.sh
 
 # RL PROJECT SECTION
