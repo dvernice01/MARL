@@ -45,7 +45,7 @@ import inspect
 from tqdm import tqdm
 import cv2
 import omni.usd
-from pxr import UsdGeom
+from pxr import UsdGeom, Usd
 
 wandb.login()
 
@@ -120,8 +120,8 @@ class VAEImageEncoder:
         # combine module path with model file name
         weight_file_path = self.config.model_file
         state_dict = self.clean_state_dict(torch.load(weight_file_path, map_location=self.device))
-        for k, v in state_dict.items():
-            print(f"{k}: {v.shape}")
+        # for k, v in state_dict.items():
+        #     print(f"{k}: {v.shape}")
         missing, unexpected = self.vae_model.load_state_dict(state_dict, strict=False)
         core_keys = [k for k in missing if "conv" in k or "dense0" in k]
         if core_keys:
@@ -162,9 +162,9 @@ class VAEImageEncoder:
             else:
                 interpolated_image = image_tensors
             z_sampled, means, log_var = self.vae_model.encode(interpolated_image)
-            n_clipped = ((log_var < -10) | (log_var > 4)).sum().item()
-            if n_clipped > 0:
-                print(f"WARNING: {n_clipped} log_var values were clamped")
+            # n_clipped = ((log_var < -10) | (log_var > 4)).sum().item()
+            # if n_clipped > 0:
+            #     print(f"WARNING: {n_clipped} log_var values were clamped")
 
         if self.config.return_sampled_latent:
             returned_val = z_sampled
@@ -313,133 +313,6 @@ class autoencoder_3d:
         with torch.no_grad():
             return torch.sigmoid(self.model.decode(latent))
 
-    # # ── Body-frame local OCC (crop of persistent global_occ_map) ──────────────
-    # def _build_local_occ_map(self, env_id: int) -> torch.Tensor:
-    #     env = self.env
-    #     cell = self.occ_cell_size
-    #     NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
-    #     NZ, NY, NX = self.occ_map_dims
-
-    #     xs = (torch.arange(NXL, device=env.device).float() - self.local_hx + 0.5) * cell # generates the x-coordinates (in metres, body frame) of the voxel centres along the local map's x-axis.
-    #     ys = (torch.arange(NYL, device=env.device).float() - self.local_hy + 0.5) * cell
-    #     zs = (torch.arange(NZL, device=env.device).float() - self.local_hz + 0.5) * cell
-    #     grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
-    #     pos_body = torch.stack([grid_x, grid_y, grid_z], dim=-1)
-    #     flat_body = pos_body.reshape(-1, 3)
-
-    #     drone_pos_w = env._robot.data.root_pos_w[env_id]
-    #     drone_quat_w = env._robot.data.root_quat_w[env_id]
-    #     yaw_quat = math_utils.yaw_quat(drone_quat_w.unsqueeze(0)).squeeze(0)
-    #     yaw_exp = yaw_quat.unsqueeze(0).expand(flat_body.shape[0], -1)
-    #     flat_world = quat_apply(yaw_exp, flat_body) + drone_pos_w
-    #     env_origin_xy = env._terrain.env_origins[env_id, :2]
-    #     flat_world[:, :2] -= env_origin_xy
-
-    #     ix = ((flat_world[:, 0] - self.occ_origin[0]) / cell).long() # converts a continuous warehouse-local position in metres back into a discrete voxel index along the global grid's x-axis.
-    #     iy = ((flat_world[:, 1] - self.occ_origin[1]) / cell).long()
-    #     iz = ((flat_world[:, 2] - self.occ_origin[2]) / cell).long()
-    #     in_bounds = (
-    #         (ix >= 0) & (ix < NX) &
-    #         (iy >= 0) & (iy < NY) &
-    #         (iz >= 0) & (iz < NZ)
-    #     )
-
-    #     local_flat = torch.zeros((flat_world.shape[0],), dtype=torch.float32, device=env.device)
-    #     if in_bounds.any():
-    #         local_flat[in_bounds] = self.global_occ_map[
-    #             env_id, iz[in_bounds], iy[in_bounds], ix[in_bounds]
-    #         ].float()
-    #     return local_flat.reshape(NZL, NYL, NXL)
-
-    # # ── Body-frame local SVS (inverse-warp of global_visit_counts) ────────────
-    # def _build_local_svs_map(
-    #     self, env_id: int, local_occ=None, return_counts: bool = False
-    # ) -> torch.Tensor:
-    #     env = self.env
-    #     cell = self.occ_cell_size
-    #     NZL, NYL, NXL = self.local_nz, self.local_ny, self.local_nx
-    #     NZ, NY, NX = self.occ_map_dims
-
-    #     xs = (torch.arange(NXL, device=env.device).float() - self.local_hx + 0.5) * cell
-    #     ys = (torch.arange(NYL, device=env.device).float() - self.local_hy + 0.5) * cell
-    #     zs = (torch.arange(NZL, device=env.device).float() - self.local_hz + 0.5) * cell
-    #     grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
-    #     pos_body = torch.stack([grid_x, grid_y, grid_z], dim=-1)
-    #     flat_body = pos_body.reshape(-1, 3)
-
-    #     drone_pos_w = env._robot.data.root_pos_w[env_id]
-    #     drone_quat_w = env._robot.data.root_quat_w[env_id]
-    #     yaw_quat = math_utils.yaw_quat(drone_quat_w.unsqueeze(0)).squeeze(0)
-    #     yaw_exp = yaw_quat.unsqueeze(0).expand(flat_body.shape[0], -1)
-    #     env_origin_xy = env._terrain.env_origins[env_id, :2]
-    #     flat_world = quat_apply(yaw_exp, flat_body) + drone_pos_w
-    #     flat_world[:, :2] -= env_origin_xy
-
-    #     ix = ((flat_world[:, 0] - self.occ_origin[0]) / cell).long()
-    #     iy = ((flat_world[:, 1] - self.occ_origin[1]) / cell).long()
-    #     iz = ((flat_world[:, 2] - self.occ_origin[2]) / cell).long()
-    #     in_bounds = (
-    #         (ix >= 0) & (ix < NX) &
-    #         (iy >= 0) & (iy < NY) &
-    #         (iz >= 0) & (iz < NZ)
-    #     )
-
-    #     counts_flat = torch.zeros((flat_world.shape[0],), dtype=torch.float32, device=env.device)
-    #     if in_bounds.any():
-    #         counts_flat[in_bounds] = self.global_visit_counts[
-    #             env_id, iz[in_bounds], iy[in_bounds], ix[in_bounds]
-    #         ]
-    #     counts = counts_flat.reshape(NZL, NYL, NXL)
-
-    #     Nt = counts.sum()
-    #     svs = torch.zeros_like(counts)
-    #     if Nt > 0:
-    #         p = counts / Nt
-    #         svs = torch.where(p > 0, -p * torch.log(p), svs)
-    #         if local_occ is None:
-    #             local_occ = self._build_local_occ_map(env_id)
-    #         svs[local_occ > 0.5] = 0.0
-    #     if return_counts:
-    #         return svs, counts
-    #     return svs
-
-    # def build_local_features(self, env_id: int) -> dict:
-    #     """
-    #     One-pass per-env build: returns everything needed by both the
-    #     observation tensor and the reward function. Avoids redoing the
-    #     body-frame voxelisation in separate reward helpers.
-
-    #     Returned dict:
-    #       'combined':         (2, NZL, NYL, NXL)  channel 0 = OCC, channel 1 = SVS
-    #       'local_occ':        (NZL, NYL, NXL)     binary
-    #       'dist_to_obstacle': scalar tensor       metres, min distance to OCC voxel
-    #                                               (= local-box half-extent if empty)
-    #       'Nt':               scalar tensor       sum of visit counts in the local box
-    #     """
-    #     local_occ = self._build_local_occ_map(env_id)
-    #     local_svs, counts = self._build_local_svs_map(
-    #         env_id, local_occ=local_occ, return_counts=True
-    #     )
-
-    #     cell = self.occ_cell_size
-    #     max_dist = float(self.local_hx) * cell
-
-    #     # Min metric distance from drone (body origin) to any OCC voxel.
-    #     occupied = torch.nonzero(local_occ > 0.5, as_tuple=False)   # (M, 3)  (iz, iy, ix)
-    #     if occupied.numel() > 0:
-    #         bz = (occupied[:, 0].float() - self.local_hz + 0.5) * cell
-    #         by = (occupied[:, 1].float() - self.local_hy + 0.5) * cell
-    #         bx = (occupied[:, 2].float() - self.local_hx + 0.5) * cell
-    #         dist_to_obstacle = torch.sqrt(bx * bx + by * by + bz * bz).min()
-    #     else:
-    #         dist_to_obstacle = torch.tensor(max_dist, device=self.env.device)
-
-    #     return {
-    #         "combined":         torch.stack([local_occ, local_svs], dim=0),
-    #         "local_occ":        local_occ,
-    #         "dist_to_obstacle": dist_to_obstacle,
-    #         "Nt":               counts.sum(),
-    #     }
 
     def build_local_features_batched(self) -> dict:
         """
@@ -581,37 +454,7 @@ class autoencoder_3d:
                 env_idx_grid[write], hiz[write], hiy[write], hix[write]
             ] = 1
 
-
-    # def _save_local_maps(self, env_ids: torch.Tensor):
-    #     step = self.env.common_step_counter
-    #     for env_id in env_ids.tolist():
-    #         combined = self.build_local_features(env_id)["combined"]
-    #         path = os.path.join(LOCAL_MAPS_SAVE_DIR, f"env{env_id}_step{step}.npy")
-    #         np.save(path, combined.cpu().numpy())
-
-
-    # def _save_online_occ_viz(self, env_id: int = 0, save_dir: str | None = None):
-    #     if save_dir is None:
-    #         save_dir = "/workspace/environment/uav_navigation/outputs"
-    #     os.makedirs(save_dir, exist_ok=True)
-    #     step = self.env.common_step_counter
-    #     local_occ = self._build_local_occ_map(env_id).cpu().numpy()
-    #     iz, iy, ix = np.where(local_occ > 0.5)
-    #     fig = plt.figure(figsize=(10, 7))
-    #     ax = fig.add_subplot(111, projection="3d")
-    #     if len(iz):
-    #         ax.scatter(ix, iy, iz, s=30, c="red", alpha=0.5, marker="s")
-    #     ax.scatter([self.local_hx], [self.local_hy], [self.local_hz],
-    #                s=180, c="blue", marker="o")
-    #     ax.set_xlabel("body x"); ax.set_ylabel("body y"); ax.set_zlabel("body z")
-    #     ax.set_title(f"Local OCC env{env_id} step{step}")
-    #     plt.tight_layout()
-    #     # plt.savefig(os.path.join(save_dir, f"online_occ_env{env_id}_step{step}.png"),
-    #     #             dpi=120, bbox_inches="tight")
-    #     plt.close()
-
 # Classe che descrive l'environment con la struttura di sempre.
-
 
 class UavNavigationEnv(DirectRLEnv):
     cfg: UavNavigationEnvCfg
@@ -634,10 +477,10 @@ class UavNavigationEnv(DirectRLEnv):
         # consecutive steps each env has been alive (gates map saving)
         self.alive_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  
 
-        self.x_min = -28.0
-        self.x_max = 8.0
-        self.y_min = -41.4
-        self.y_max = 33.42
+        self.x_min = -12.0
+        self.x_max = 12.0
+        self.y_min = -18.0
+        self.y_max = 20.81
         self.z_min = 0.0
         self.z_max = 9.30
         
@@ -748,7 +591,7 @@ class UavNavigationEnv(DirectRLEnv):
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
-
+        
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._prev_actions = self._actions.clone()

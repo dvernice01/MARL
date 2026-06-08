@@ -78,7 +78,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     terrain: TerrainImporterCfg = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="usd",
-        usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/full_warehouse.usd",
+        usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/warehouse_multiple_shelves.usd",
         collision_group=1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -90,9 +90,23 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
 
+    # terrain = TerrainImporterCfg(
+    #     prim_path="/World/ground",
+    #     terrain_type="plane",
+    #     collision_group=-1,
+    #     physics_material=sim_utils.RigidBodyMaterialCfg(
+    #         friction_combine_mode="multiply",
+    #         restitution_combine_mode="multiply",
+    #         static_friction=1.0,
+    #         dynamic_friction=1.0,
+    #         restitution=0.0,
+    #     ),
+    #     debug_vis=False,
+    # )
+
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=20, env_spacing=2.5, replicate_physics=True
+        num_envs=25, env_spacing=2.5, replicate_physics=True
     )
 
     # robot
@@ -125,10 +139,10 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
         ray_alignment="yaw",
         mesh_prim_paths=[],  # populated at runtime
         pattern_cfg=patterns.LidarPatternCfg(
-            channels=24,
+            channels=8,
             vertical_fov_range=(-45.0, 45.0),
             horizontal_fov_range=(-180.0, 180.0),
-            horizontal_res=2.0,
+            horizontal_res=10.0,
         ),
         debug_vis=False,
     )
@@ -138,8 +152,8 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/Robot/body/front_cam",  # aggiungere o togliere /Robot/body prima di front_cam in base a se stai collezionando dati o facendo RL
         update_period=1.0 * decimation / 120,
         update_latest_camera_pose=True,  
-        height=270,   # keep small for RL — 480x640 will crush perf at 4096 envs
-        width=480,
+        height=67,   # keep small for RL — 480x640 will crush perf at 4096 envs
+        width=120,
         data_types=["distance_to_camera"],  # depth sensing
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=11.04, # per essere coerente con VAE

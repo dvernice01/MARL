@@ -133,16 +133,14 @@ def save_reproducibility_info(log_dir, agent, args_cli, env_cfg):
 
     print(f"[INFO] Reproducibility info saved to: {repro_dir}")
 
+
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(env_cfg, agent_cfg: dict):
 
     # ── 1. Init wandb FIRST so sweep config is available ──────────────
     run = wandb.init(
         sync_tensorboard=True,
-        resume="allow",
-        entity="damianovernice01-politecnico-di-bari",
         project="uav_navigation",
-        id="robust-pond-56",
     )
     sweep_cfg = wandb.config  # sweep controller injects values here
 
@@ -202,7 +200,7 @@ def main(env_cfg, agent_cfg: dict):
 
     # ── 6. Trainer ────────────────────────────────────────────────────
     rollouts = sweep_cfg.get("rollouts", 64)
-    default_timesteps = 1500000
+    default_timesteps = 1000000
     trainer_cfg = {
         "timesteps": args_cli.max_iterations * rollouts if args_cli.max_iterations else default_timesteps,
         "headless": True,
