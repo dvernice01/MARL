@@ -5,6 +5,7 @@ parser = argparse.ArgumentParser(description="Collect depth dataset from Isaac L
 parser.add_argument("--num_envs",    type=int, default=16)
 parser.add_argument("--num_samples", type=int, default=10000)
 parser.add_argument("--output_dir",  type=str, default="/workspace/vae_container/Vae/isaaclab_dataset_right_size")
+parser.add_argument("--start_idx",   type=int, default=15000)  # offset for sample file names to avoid overwriting existing data
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -99,81 +100,56 @@ class DepthCollectionEnv(DirectRLEnv):
         Z: -0.01 → 9.30  (height=9.31m)
         """
 
-        pos_x = torch.zeros(n, device=self.device).uniform_(-27.0, 7.0) + self._terrain.env_origins[env_ids, 0]
-        pos_y = torch.zeros(n, device=self.device).uniform_(-5.0, 32.0) + self._terrain.env_origins[env_ids, 1]
-        pos_z = torch.zeros(n, device=self.device).uniform_( 0.5, 6.0) + self._terrain.env_origins[env_ids, 2]
+        pos_x = torch.zeros(n, device=self.device).uniform_(-20.0, 0.0) + self._terrain.env_origins[env_ids, 0]
+        pos_y = torch.zeros(n, device=self.device).uniform_(-2.0, 5.0) + self._terrain.env_origins[env_ids, 1]
+        pos_z = torch.zeros(n, device=self.device).uniform_( 3.0, 7.0) + self._terrain.env_origins[env_ids, 2]
 
         positions = torch.stack([pos_x, pos_y, pos_z], dim=-1)
 
-        yaw   = torch.zeros(n, device=self.device).uniform_(-3.14159, 3.14159)
-        pitch = torch.zeros(n, device=self.device).uniform_(-0.4, -0.2)
-        roll  = torch.zeros(n, device=self.device)
+        # fixed heading — camera level, pointing down the aisle toward the shelves
+        YAW_FIXED = 0.0   # radians; pick the value that aims at the shelves (see note below)
+        yaw = torch.full((n,), YAW_FIXED, device=self.device)
 
-        # Base quaternion: rotate -90 deg around X to point camera forward
-        base_qx = torch.full((n,), -0.7071, device=self.device)
+        # base quaternion: -90 deg about X so the camera looks forward (horizontal)
         base_qw = torch.full((n,),  0.7071, device=self.device)
+        base_qx = torch.full((n,), -0.7071, device=self.device)
         base_qy = torch.zeros(n, device=self.device)
         base_qz = torch.zeros(n, device=self.device)
 
-        # Compose with yaw rotation
+        # yaw quaternion (rotation about world Z)
         cy, sy = torch.cos(yaw * 0.5), torch.sin(yaw * 0.5)
-        qw_yaw = cy
-        qx_yaw = torch.zeros(n, device=self.device)
-        qy_yaw = torch.zeros(n, device=self.device)
-        qz_yaw = sy
+        qw_yaw, qx_yaw, qy_yaw, qz_yaw = cy, torch.zeros_like(cy), torch.zeros_like(cy), sy
 
-        # Multiply: q_final = q_yaw * q_base
+        # compose: q_final = q_yaw * q_base
         qw = qw_yaw * base_qw - qx_yaw * base_qx - qy_yaw * base_qy - qz_yaw * base_qz
         qx = qw_yaw * base_qx + qx_yaw * base_qw + qy_yaw * base_qz - qz_yaw * base_qy
         qy = qw_yaw * base_qy - qx_yaw * base_qz + qy_yaw * base_qw + qz_yaw * base_qx
         qz = qw_yaw * base_qz + qx_yaw * base_qy - qy_yaw * base_qx + qz_yaw * base_qw
 
         orientations = torch.stack([qw, qx, qy, qz], dim=-1)
-
         self.camera.set_world_poses(positions, orientations, env_ids)
+
 
     def _reset_orientation_only(self, env_ids):
         """Re-randomize camera orientation without changing position."""
         n = len(env_ids)
         current_pos = self.camera.data.pos_w[env_ids]
 
-        yaw   = torch.zeros(n, device=self.device).uniform_(-3.14159, 3.14159)
-        pitch = torch.zeros(n, device=self.device).uniform_(-1.2, 0.6)
-        roll  = torch.zeros(n, device=self.device).uniform_(-0.5, 0.5)
+        # re-randomize heading (yaw) only — keep the camera level and forward
+        yaw = torch.zeros(n, device=self.device).uniform_(-3.14159, 3.14159)
 
-        # Base quaternion: rotate -90 deg around X to point camera forward
-        base_qx = torch.full((n,), -0.7071, device=self.device)
         base_qw = torch.full((n,),  0.7071, device=self.device)
+        base_qx = torch.full((n,), -0.7071, device=self.device)
         base_qy = torch.zeros(n, device=self.device)
         base_qz = torch.zeros(n, device=self.device)
 
-        # Yaw quaternion (rotation around Z)
         cy, sy = torch.cos(yaw * 0.5), torch.sin(yaw * 0.5)
         qw_yaw, qx_yaw, qy_yaw, qz_yaw = cy, torch.zeros_like(cy), torch.zeros_like(cy), sy
 
-        # Pitch quaternion (rotation around Y)
-        cp, sp = torch.cos(pitch * 0.5), torch.sin(pitch * 0.5)
-        qw_pitch, qx_pitch, qy_pitch, qz_pitch = cp, torch.zeros_like(cp), sp, torch.zeros_like(cp)
-
-        # Roll quaternion (rotation around X)
-        cr, sr = torch.cos(roll * 0.5), torch.sin(roll * 0.5)
-        qw_roll, qx_roll, qy_roll, qz_roll = cr, sr, torch.zeros_like(cr), torch.zeros_like(cr)
-
-        # Helper: multiply two quaternions q1 * q2
-        def quat_mul(w1, x1, y1, z1, w2, x2, y2, z2):
-            w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-            x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-            y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-            z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-            return w, x, y, z
-
-        # Compose: q_final = q_yaw * q_pitch * q_roll * q_base
-        w, x, y, z = quat_mul(qw_roll, qx_roll, qy_roll, qz_roll,
-                                base_qw, base_qx, base_qy, base_qz)
-        w, x, y, z = quat_mul(qw_pitch, qx_pitch, qy_pitch, qz_pitch,
-                                w, x, y, z)
-        qw, qx, qy, qz = quat_mul(qw_yaw, qx_yaw, qy_yaw, qz_yaw,
-                                    w, x, y, z)
+        qw = qw_yaw * base_qw - qx_yaw * base_qx - qy_yaw * base_qy - qz_yaw * base_qz
+        qx = qw_yaw * base_qx + qx_yaw * base_qw + qy_yaw * base_qz - qz_yaw * base_qy
+        qy = qw_yaw * base_qy - qx_yaw * base_qz + qy_yaw * base_qw + qz_yaw * base_qx
+        qz = qw_yaw * base_qz + qx_yaw * base_qy - qy_yaw * base_qx + qz_yaw * base_qw
 
         orientations = torch.stack([qw, qx, qy, qz], dim=-1)
         self.camera.set_world_poses(current_pos, orientations, env_ids)
@@ -192,12 +168,12 @@ def collect_dataset():
     collision_processor = CollisionImage()
 
     samples_collected = 0
-    sample_idx        = 0
+    sample_idx        = args_cli.start_idx
 
     print(f"Collecting {args_cli.num_samples} samples...")
     obs, _ = env.reset()
 
-    ORIENTATIONS_PER_POSE = 4
+    ORIENTATIONS_PER_POSE = 1
 
     with tqdm(total=args_cli.num_samples) as pbar:
         while samples_collected < args_cli.num_samples:
@@ -225,12 +201,15 @@ def collect_dataset():
 
                     d = depth_np[i]
                     d = np.where(np.isfinite(d), d, 10.0)
+
+                    # keep only frames that contain real geometry (reject empty/sky frames)
                     valid_pixels = np.sum((d > 0.1) & (d < 9.9))
-                    if valid_pixels < (d.size * 0.15):
+                    if valid_pixels < (d.size * 0.10):
                         continue
 
-                    far_ratio = np.sum(d >= 9.5) / d.size
-                    if far_ratio > 0.7:
+                    # reject frames that are almost entirely max-range void (no signal)
+                    void_ratio = np.sum(d >= 9.5) / d.size
+                    if void_ratio > 0.90:
                         continue
 
                     collision = collision_processor.depth_to_collision_image(d)

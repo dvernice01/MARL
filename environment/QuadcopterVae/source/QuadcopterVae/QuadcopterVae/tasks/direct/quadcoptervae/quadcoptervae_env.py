@@ -61,7 +61,7 @@ class vae_config:
     latent_dims = 512
     #032824
     model_file = (
-        "/workspace/vae_container/Vae/runs/xve5n1nh/brisk-sweep-1/checkpoints/vae_best_20260515_091157.pt"
+        "/workspace/vae_container/Vae/runs/l7dd58vd/mild-sweep-1/checkpoints/vae_best_20260606_063918.pt"
     )
     model_folder = "/workspace/vae_container/Vae/checkpoint"
     image_res = (270, 480)
