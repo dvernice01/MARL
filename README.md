@@ -2,7 +2,16 @@
 
 # SUCCESSIVAMENTE VERRA' INTEGRATA LA PARTE RELATIVA AGLI ALTRI TRAINING.
 
-I file di interesse sono quelli in riferimento al progetto: "environment/uav_navigation".
+# DOCKER SECTION
+Innanzitutto bisogna entrare nella cartella IsaacLab_reduced e runnare il seguente comando:
+    - docker pull nvcr.io/nvidia/isaac-lab:2.3.2 
+Fatto ciò, si rende il run-file eseguibile con
+    - chmod +x run.sh
+e si runni il file con 
+    - ./run.sh
+
+# RL PROJECT SECTION
+I file di interesse sono quelli in riferimento al progetto: "/workspace/environment/uav_navigation".
 
 Gli scripts per il training seguono la logica di quelli che mi condividesti tu.
 
@@ -36,6 +45,7 @@ Il file "uav_navigation_env.py" contiene una serie di brevi commenti che spiegan
 
 
 L'ambiente è runnabile lanciando i seguenti comandi:
+  - cd /workspace/environment/uav_navigation
   - python -m pip install -e source/uav_navigation
   - pip install skrl==1.4.3
   - python scripts/skrl/train_manual.py --task=Template-Uav-Navigation-Direct-v0 --enable_cameras --headless
