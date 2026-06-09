@@ -185,9 +185,7 @@ class HierarchicalGRUValue(DeterministicMixin, Model):
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
 
-        return torch.tanh(x), {"rnn": [hidden_states]}
-
-
+        return return self.net(rnn_output), {"rnn": [hidden_states]}
 
 
 # --------------------------------

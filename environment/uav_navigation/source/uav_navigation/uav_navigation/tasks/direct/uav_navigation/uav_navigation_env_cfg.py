@@ -176,5 +176,5 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1
     death_reward_scale = -50.0
-    distance_to_obstacles_reward_scale = 5.0
-    exploration_reward_scale = 5.0
+    distance_to_obstacles_reward_scale = 1.0
+    exploration_reward_scale = 1.0
