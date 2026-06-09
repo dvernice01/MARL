@@ -240,7 +240,7 @@ def get_ppo_agent(env, device, agent_cfg=None, log_dir="logs/defaults"):
     # Read all sweep parameters with fallbacks to your defaults
     hidden_size        = get("hidden_size", 2048)
     hidden_size_gru    = get("hidden_size_gru", 512)
-    rollouts           = get("rollouts", 64)
+    rollouts           = get("rollouts", 256)
     learning_rate      = get("learning_rate", 5e-4)
     learning_epochs    = get("learning_epochs", 15)
     discount_factor    = get("discount_factor", 0.99)
