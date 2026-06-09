@@ -519,6 +519,16 @@ class UavNavigationEnv(DirectRLEnv):
 
         self.policy_network = self._load_policy_network()
         self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
+        self._prev_dist_to_goal = torch.zeros(self.num_envs, device=self.device)
+
+        # Curriculum state (global level, expanding spawn box).
+        self.curriculum_frac = self.cfg.curriculum_start_frac
+        self._curr_episodes = 0
+        self._curr_successes = 0
+        
+        # True if the drone entered the goal sphere at any point this episode.
+        self._reached_goal = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
         # ── Cached perception features used by _get_rewards / _get_dones ─────
         # Default to a large value so step 0 doesn't false-positive a collision.
         _local_half_extent = (LOCAL_NX // 2) * LOCAL_CELL_SIZE
@@ -592,6 +602,35 @@ class UavNavigationEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
         
+    def _sample_drone_and_goal(self, n: int):
+        """Sample drone and goal positions in the curriculum box, enforcing a
+        minimum separation so reaching the goal always requires navigation."""
+        frac = self.curriculum_frac
+
+        def axis(lo, hi):
+            c = 0.5 * (lo + hi)       # centro del box (x_min + x_max) / 2
+            h = 0.5 * (hi - lo) * frac      # larghezza del box moltiplicata per la frazione di curriculum
+            return torch.empty(n, device=self.device).uniform_(c - h, c + h)
+
+        def sample_box():
+            return torch.stack(
+                [axis(self.x_min + 1.0, self.x_max - 1.0),
+                 axis(self.y_min + 1.0, self.y_max - 1.0),
+                 axis(self.z_min + 1.0, self.z_max - 1.0)],
+                dim=1,
+            )
+
+        drone = sample_box()
+        goal = drone.clone()
+        too_close = torch.ones(n, dtype=torch.bool, device=self.device)
+        for _ in range(self.cfg.curriculum_max_resample):
+            if not too_close.any():
+                break
+            cand = sample_box()
+            goal[too_close] = cand[too_close]
+            dist = torch.linalg.norm(goal - drone, dim=1)
+            too_close = dist < self.cfg.min_goal_separation
+        return drone, goal
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._prev_actions = self._actions.clone()
@@ -642,6 +681,9 @@ class UavNavigationEnv(DirectRLEnv):
             self._desired_pos_w
         )
         self.final_distance_to_goal = torch.linalg.norm(self.rel_pos_b, dim=1)
+        
+        self._reached_goal |= self.final_distance_to_goal < self.cfg.goal_radius
+        
         depth = self.camera.data.output["distance_to_camera"]  # (N, H, W, 1)
         # ── Min depth in the camera FOV — used by distance-to-obstacles reward ─
         max_range = float(self.cfg.camera.spawn.clipping_range[1])
@@ -751,7 +793,21 @@ class UavNavigationEnv(DirectRLEnv):
         ang_vel_sum = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
         lin_vel = 1 - torch.tanh(lin_vel_sum / 0.8)
         ang_vel = 1 - torch.tanh(ang_vel_sum / 0.8)
-        distance_to_goal_mapped = 1 - torch.tanh(self.final_distance_to_goal / 8.0)
+        # ── Goal-distance reward (Kulkarni & Alexis 2024, eq. 2) ──────────────
+        d = self.final_distance_to_goal                          # ||n^g_t||_2
+        prev_d = self._prev_dist_to_goal                         # ||n^g_{t-1}||_2
+
+        r1 = torch.exp(-(d ** 2) / self.cfg.goal_nu1)            # narrow Gaussian
+        r2 = torch.exp(-(d ** 2) / self.cfg.goal_nu2)            # broad Gaussian
+        r3 = 1.0 - torch.clamp(d / self.cfg.goal_nu3, 0.0, 1.0)  # normalized linear
+        r4 = prev_d - d                                          # progress (>0 approaching)
+
+        distance_to_goal_reward = (
+            self.cfg.goal_lambda1 * r1
+            + self.cfg.goal_lambda2 * r2
+            + self.cfg.goal_lambda3 * r3
+            + self.cfg.goal_progress_scale * r4
+        )
 
         action_diff = self._actions - self._prev_actions
         action_reg_diff = torch.norm(action_diff, p=2, dim=-1)
@@ -777,7 +833,7 @@ class UavNavigationEnv(DirectRLEnv):
         rewards = {
             "lin_vel":                  lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel":                  ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
-            "distance_to_goal":         distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "distance_to_goal":         distance_to_goal_reward * self.step_dt,
             "action_reg_diff":          action_reg_diff * self.cfg.rew_scale_action_reg * self.step_dt,
             "life":                     life * self.step_dt,
             "distance_to_obstacles":    dist_to_obs_reward * self.cfg.distance_to_obstacles_reward_scale * self.step_dt,
@@ -786,6 +842,9 @@ class UavNavigationEnv(DirectRLEnv):
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         for key, value in rewards.items():
             self._episode_sums[key] += value
+        
+        self._prev_dist_to_goal = d.clone()
+
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -828,6 +887,24 @@ class UavNavigationEnv(DirectRLEnv):
             self._desired_pos_w[env_ids] - self._robot.data.root_pos_w[env_ids],
             dim=1,
         )
+
+        # ── Curriculum: count successes among ended episodes, grow the box ───
+        ended_mask = self.reset_terminated[env_ids] | self.reset_time_outs[env_ids]
+        n_ended = int(ended_mask.sum().item())
+        if n_ended > 0:
+            success_mask = self.reset_time_outs[env_ids] & self._reached_goal[env_ids]
+            self._curr_episodes += n_ended
+            self._curr_successes += int(success_mask.sum().item())
+            if self._curr_episodes >= self.cfg.curriculum_window:
+                success_rate = self._curr_successes / max(self._curr_episodes, 1)
+                if success_rate >= self.cfg.curriculum_success_threshold:
+                    self.curriculum_frac = min(
+                        self.curriculum_frac + self.cfg.curriculum_step,
+                        self.cfg.curriculum_max_frac,
+                    )
+                self._curr_episodes = 0
+                self._curr_successes = 0
+
         self._episode_sums["final_distance_to_goal"][env_ids] = terminal_distance * self.max_episode_length_s
 
         # ── Reset visit counts for terminated envs ────────────────────────────
@@ -846,6 +923,7 @@ class UavNavigationEnv(DirectRLEnv):
                 extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
         self.extras["log"].update(extras)
+        self.extras["log"]["Curriculum/frac"] = torch.tensor(self.curriculum_frac, device=self.device)
 
         super()._reset_idx(env_ids)
         if len(env_ids) == self.num_envs:
@@ -854,23 +932,41 @@ class UavNavigationEnv(DirectRLEnv):
         self._prev_actions[env_ids] = 0.0
         self._actions[env_ids] = 0.0
         self.alive_steps[env_ids] = 0
+        self._reached_goal[env_ids] = False
 
-        self._desired_pos_w[env_ids, 0] = torch.empty_like(
-            self._desired_pos_w[env_ids, 0]
-        ).uniform_(self.x_min + 1.0, self.x_max - 1.0)
-        self._desired_pos_w[env_ids, 1] = torch.empty_like(
-            self._desired_pos_w[env_ids, 1]
-        ).uniform_(self.y_min + 1.0, self.y_max - 1.0)
-        self._desired_pos_w[env_ids, 2] = torch.empty_like(
-            self._desired_pos_w[env_ids, 2]
-        ).uniform_(self.z_min + 1.0, self.z_max - 1.0)
+        # gx, gy, gz = self._sample_in_curriculum_box(len(env_ids))
+        # self._desired_pos_w[env_ids, 0] = gx
+        # self._desired_pos_w[env_ids, 1] = gy
+        # self._desired_pos_w[env_ids, 2] = gz
+
+        # self._desired_pos_w[env_ids, 0] = torch.empty_like(
+        #     self._desired_pos_w[env_ids, 0]
+        # ).uniform_(self.x_min + 1.0, self.x_max - 1.0)
+        # self._desired_pos_w[env_ids, 1] = torch.empty_like(
+        #     self._desired_pos_w[env_ids, 1]
+        # ).uniform_(self.y_min + 1.0, self.y_max - 1.0)
+        # self._desired_pos_w[env_ids, 2] = torch.empty_like(
+        #     self._desired_pos_w[env_ids, 2]
+        # ).uniform_(self.z_min + 1.0, self.z_max - 1.0)
 
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
-        default_root_state[:, 0] = torch.empty_like(default_root_state[:, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
-        default_root_state[:, 1] = torch.empty_like(default_root_state[:, 1]).uniform_(self.y_min + 1.0, self.y_max - 1.0)
-        default_root_state[:, 2] = torch.empty_like(default_root_state[:, 2]).uniform_(self.z_min + 1.0, self.z_max - 1.0)
+        # dx, dy, dz = self._sample_in_curriculum_box(len(env_ids))
+        # default_root_state[:, 0] = dx
+        # default_root_state[:, 1] = dy
+        # default_root_state[:, 2] = dz
+        drone_pos, goal_pos = self._sample_drone_and_goal(len(env_ids))
+        self._desired_pos_w[env_ids] = goal_pos
+        self._prev_dist_to_goal[env_ids] = torch.linalg.norm(goal_pos - drone_pos, dim=1)
+
+        default_root_state[:, 0] = drone_pos[:, 0]
+        default_root_state[:, 1] = drone_pos[:, 1]
+        default_root_state[:, 2] = drone_pos[:, 2]
+
+        # default_root_state[:, 0] = torch.empty_like(default_root_state[:, 0]).uniform_(self.x_min + 1.0, self.x_max - 1.0)
+        # default_root_state[:, 1] = torch.empty_like(default_root_state[:, 1]).uniform_(self.y_min + 1.0, self.y_max - 1.0)
+        # default_root_state[:, 2] = torch.empty_like(default_root_state[:, 2]).uniform_(self.z_min + 1.0, self.z_max - 1.0)
 
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)

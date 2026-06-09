@@ -172,9 +172,33 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     # reward scales
     lin_vel_reward_scale = 0.0
     ang_vel_reward_scale = 0.0
-    distance_to_goal_reward_scale = 50.0
     rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1
     death_reward_scale = -50.0
     distance_to_obstacles_reward_scale = 1.0
     exploration_reward_scale = 1.0
+
+
+    # ── Goal-distance reward (Kulkarni & Alexis 2024, eq. 2) ─────────────
+    # r1, r2: two Gaussian kernels exp(-d^2/nu) at different widths
+    goal_nu1: float = 4.0            # narrow: fine final approach (~1-2 m)
+    goal_nu2: float = 200.0          # broad: long-range pull (meaningful at 10-20 m)
+    goal_lambda1: float = 5.0
+    goal_lambda2: float = 5.0
+    # r3: linear normalized proximity 1 - d/nu3 (nu3 >= map diagonal ~47 m)
+    goal_nu3: float = 47.0
+    goal_lambda3: float = 2.0
+    # r4: progress / delta-distance reward, weight on (d_{t-1} - d_t)
+    goal_progress_scale: float = 30.0
+
+    # ── Goal reaching / success ──────────────────────────────────────────
+    goal_radius: float = 1.0
+
+    # ── Curriculum: expanding spawn box for drone and goal ───────────────
+    curriculum_start_frac: float = 0.15      # initial fraction of the full box
+    curriculum_max_frac: float = 1.0
+    curriculum_step: float = 0.5             # frac increment per level-up
+    curriculum_window: int = 100             # completed episodes per evaluation
+    curriculum_success_threshold: float = 0.70
+    min_goal_separation: float = 1.5         # min drone-goal distance at spawn (> goal_radius)
+    curriculum_max_resample: int = 10        # resample tries to satisfy separation
