@@ -185,7 +185,7 @@ class HierarchicalGRUValue(DeterministicMixin, Model):
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
 
-        return return self.net(rnn_output), {"rnn": [hidden_states]}
+        return x, {"rnn": [hidden_states]}
 
 
 # --------------------------------
@@ -199,7 +199,8 @@ DEFAULT_PPO_CONFIG = {
     "learning_rate": 5.0e-04,
     "learning_rate_scheduler": KLAdaptiveLR,
     "learning_rate_scheduler_kwargs": {
-        "kl_threshold": 0.008
+        "kl_threshold": 0.016,
+        "min_lr": 1.0e-04,
     },
     "state_preprocessor": RunningStandardScaler,
     "state_preprocessor_kwargs": {},
@@ -241,8 +242,8 @@ def get_ppo_agent(env, device, agent_cfg=None, log_dir="logs/defaults"):
     hidden_size        = get("hidden_size", 2048)
     hidden_size_gru    = get("hidden_size_gru", 512)
     rollouts           = get("rollouts", 256)
-    learning_rate      = get("learning_rate", 5e-4)
-    learning_epochs    = get("learning_epochs", 15)
+    learning_rate      = get("learning_rate", 3e-4)
+    learning_epochs    = get("learning_epochs", 5)
     discount_factor    = get("discount_factor", 0.99)
     entropy_loss_scale = get("entropy_loss_scale", 0.0)
 
