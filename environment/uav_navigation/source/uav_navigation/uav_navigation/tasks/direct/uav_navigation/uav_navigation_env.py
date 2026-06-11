@@ -603,20 +603,28 @@ class UavNavigationEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
         
     def _sample_drone_and_goal(self, n: int):
-        """Sample drone and goal positions in the curriculum box, enforcing a
-        minimum separation so reaching the goal always requires navigation."""
+        """Sample drone and goal in the curriculum box, with a min separation.
+        For the first two levels the box is offset off the central shelf into a
+        free aisle; from the third level on it uses the map center, since the box
+        is large and an offset would push samples outside the warehouse."""
         frac = self.curriculum_frac
 
-        def axis(lo, hi):
-            c = 0.5 * (lo + hi)       # centro del box (x_min + x_max) / 2
-            h = 0.5 * (hi - lo) * frac      # larghezza del box moltiplicata per la frazione di curriculum
-            return torch.empty(n, device=self.device).uniform_(c - h, c + h)
+        use_offset = frac <= self.cfg.curriculum_start_frac + self.cfg.curriculum_step + 1e-6
+        cx = self.cfg.curriculum_center_x if use_offset else 0.5 * (self.x_min + self.x_max)
+        cy = self.cfg.curriculum_center_y if use_offset else 0.5 * (self.y_min + self.y_max)
+
+        def axis(lo, hi, center):
+            h = 0.5 * (hi - lo) * frac
+            return torch.empty(n, device=self.device).uniform_(center - h, center + h)
+
+        def fixed_axis(lo, hi):
+            return torch.empty(n, device=self.device).uniform_(lo, hi)
 
         def sample_box():
             return torch.stack(
-                [axis(self.x_min + 1.0, self.x_max - 1.0),
-                 axis(self.y_min + 1.0, self.y_max - 1.0),
-                 axis(self.z_min + 1.0, self.z_max - 1.0)],
+                [axis(self.x_min + 1.0, self.x_max - 1.0, cx),
+                 axis(self.y_min + 1.0, self.y_max - 1.0, cy),
+                 fixed_axis(self.cfg.spawn_z_min, self.cfg.spawn_z_max)],
                 dim=1,
             )
 

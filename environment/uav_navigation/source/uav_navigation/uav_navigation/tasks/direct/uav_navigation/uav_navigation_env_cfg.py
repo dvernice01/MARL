@@ -202,3 +202,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     curriculum_success_threshold: float = 0.70
     min_goal_separation: float = 1.5         # min drone-goal distance at spawn (> goal_radius)
     curriculum_max_resample: int = 10        # resample tries to satisfy separation
+    curriculum_center_x: float = 3.0   # free-aisle center, first two levels only
+    curriculum_center_y: float = 1.4
+    spawn_z_min: float = 1.0           # aisle altitude band
+    spawn_z_max: float = 2.5
