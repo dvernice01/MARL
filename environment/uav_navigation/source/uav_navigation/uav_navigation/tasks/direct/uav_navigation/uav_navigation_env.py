@@ -493,9 +493,6 @@ class UavNavigationEnv(DirectRLEnv):
                 "life",
                 "distance_to_obstacles",
                 "exploration",
-                "died",
-                "died_collision",
-                "time_out",
                 "action_reg_diff",
                 "final_distance_to_goal",
                 "mean_dist_to_obstacle",   
@@ -802,8 +799,8 @@ class UavNavigationEnv(DirectRLEnv):
         lin_vel = 1 - torch.tanh(lin_vel_sum / 0.8)
         ang_vel = 1 - torch.tanh(ang_vel_sum / 0.8)
         # ── Goal-distance reward (Kulkarni & Alexis 2024, eq. 2) ──────────────
-        d = self.final_distance_to_goal                          # ||n^g_t||_2
-        prev_d = self._prev_dist_to_goal                         # ||n^g_{t-1}||_2
+        d = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
+        prev_d = self._prev_dist_to_goal                         
 
         r1 = torch.exp(-(d ** 2) / self.cfg.goal_nu1)            # narrow Gaussian
         r2 = torch.exp(-(d ** 2) / self.cfg.goal_nu2)            # broad Gaussian
@@ -832,11 +829,12 @@ class UavNavigationEnv(DirectRLEnv):
         
         # ── Distance to obstacles ─────────────────────────────────────────
         dist_to_obs_reward = torch.tanh(self._min_depth_cache / self.cfg.safety_radius)
-
         exploration_reward = (
             self.cfg.exploration_gamma
-            * self.autoencoder3D.entered_new_cell.float()
+            * torch.exp(-self.cfg.exploration_delta * self._Nt_cache)
+            * (d >= self.cfg.exploration_stop).float()
         )
+        # se si è vicini alla posizione obiettivo, non incentivare più l'esplorazione, altrimenti il drone potrebbe essere tentato di allontanarsi per esplorare nuove celle.
 
         rewards = {
             "lin_vel":                  lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -881,9 +879,6 @@ class UavNavigationEnv(DirectRLEnv):
             (self._dist_to_obstacle_cache[env_ids] < self.cfg.collision_distance)
         ).sum().item())
 
-        self._episode_sums["died"] += num_deaths
-        self._episode_sums["died_collision"] += num_deaths_collision
-        self._episode_sums["time_out"] += num_timeouts
         cells_visited_per_env = (
             self.autoencoder3D.global_visit_counts[env_ids] > 0
         ).flatten(1).sum(dim=1).float()
@@ -900,7 +895,7 @@ class UavNavigationEnv(DirectRLEnv):
         ended_mask = self.reset_terminated[env_ids] | self.reset_time_outs[env_ids]
         n_ended = int(ended_mask.sum().item())
         if n_ended > 0:
-            success_mask = self.reset_time_outs[env_ids] & self._reached_goal[env_ids]
+            success_mask = self.reset_time_outs[env_ids] & (terminal_distance < self.cfg.goal_radius)
             self._curr_episodes += n_ended
             self._curr_successes += int(success_mask.sum().item())
             if self._curr_episodes >= self.cfg.curriculum_window:
@@ -923,15 +918,18 @@ class UavNavigationEnv(DirectRLEnv):
         extras = dict()
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
-            if key in ["died", "died_collision", "time_out"]:
-                extras["Episode_Termination/" + key] = episodic_sum_avg / self.max_episode_length_s
-            elif key in ["final_distance_to_goal", "mean_dist_to_obstacle", "cells_visited"]:
+            if key in ["final_distance_to_goal", "mean_dist_to_obstacle", "cells_visited"]:
                 extras["Episode_Info/" + key] = episodic_sum_avg / self.max_episode_length_s
             else:
                 extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
+
         self.extras["log"].update(extras)
         self.extras["log"]["Curriculum/frac"] = torch.tensor(self.curriculum_frac, device=self.device)
+        n_reset = max(len(env_ids), 1)
+        self.extras["log"]["Episode_Termination/died"] = torch.tensor(num_deaths / n_reset, device=self.device)
+        self.extras["log"]["Episode_Termination/time_out"] = torch.tensor(num_timeouts / n_reset, device=self.device)
+        self.extras["log"]["Episode_Termination/died_collision"] = torch.tensor(num_deaths_collision / n_reset, device=self.device)
 
         super()._reset_idx(env_ids)
         if len(env_ids) == self.num_envs:

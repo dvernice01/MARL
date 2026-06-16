@@ -12,7 +12,7 @@ from skrl.resources.preprocessors.torch import RunningStandardScaler
 # --- Custom Model Definitions ---
 class HierarchicalGRUPolicy(GaussianMixin, Model):
     def __init__(self, observation_space, action_space, device, clip_actions=False,
-                 clip_log_std=True, min_log_std=-20, max_log_std=2, initial_log_std=0,
+                 clip_log_std=True, min_log_std=-20, max_log_std=2.0, initial_log_std=0,
                  num_envs=1, num_layers=1, hidden_size=2048, hidden_size_gru=512, sequence_length=8):
         Model.__init__(self, observation_space, action_space, device)
         GaussianMixin.__init__(self, clip_actions, clip_log_std, min_log_std, max_log_std)
