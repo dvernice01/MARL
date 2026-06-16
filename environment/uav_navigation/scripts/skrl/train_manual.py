@@ -215,7 +215,15 @@ def main(env_cfg, agent_cfg: dict):
     print(f"GPU total used:   {int(out.strip())/1024:.2f} GB")
 
     trainer = SequentialTrainer(cfg=trainer_cfg, env=env, agents=agent)
+
+    # resume from a checkpoint if provided
+    if args_cli.checkpoint:
+        resume_path = os.path.abspath(args_cli.checkpoint)
+        print(f"[INFO] Resuming training from checkpoint: {resume_path}")
+        agent.load(resume_path)
+
     trainer.train()
+
     env.close()
 
 if __name__ == "__main__":
