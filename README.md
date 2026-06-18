@@ -48,6 +48,9 @@ and run it with:
     - vae_container -> Container used for ML section. It contains the VAE and 3D-AE architectures (vae_residual_batch.py and autoencoder3d.py) and the training file runnable by wandb agent:
           - wandb sweep --project vae_training config.yaml or wandb sweep --project 3d_ae_training config_3d.yaml and then by copying and pasting the yellow sentence
 
+the occupancymap3d_fw.py file is used to get the global 3D map of the full_warehouse but before using it, move it in the IsaacLab container, under the "source" folder then run python3 source/occupancymap3d_fw.py
+
+
 # RL PROJECT SECTION
 All the RL projects in the environment folder share the same architecture with same files. For this reason, the structure is created for uav_navigation file but it fits every project.
 
