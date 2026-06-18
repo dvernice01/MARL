@@ -184,6 +184,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
+    env_cfg.eval_fixed_spawn_xy = (-10, -16)
+    # Make the render/recording camera follow the drone
+    env_cfg.viewer.origin_type = "asset_root"
+    env_cfg.viewer.asset_name = "robot"
+    env_cfg.viewer.eye = (0.0, -6.0, 3.0)    # 6 m behind (-y) and 3 m above the drone
+    env_cfg.viewer.lookat = (0.0, 0.0, 0.0)  # look at the drone
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 

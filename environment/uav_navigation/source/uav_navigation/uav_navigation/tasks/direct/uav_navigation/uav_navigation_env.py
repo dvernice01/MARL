@@ -477,10 +477,10 @@ class UavNavigationEnv(DirectRLEnv):
         # consecutive steps each env has been alive (gates map saving)
         self.alive_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  
 
-        self.x_min = -12.0
-        self.x_max = 12.0
-        self.y_min = -18.0
-        self.y_max = 20.81
+        self.x_min = -28.0
+        self.x_max = 8.0
+        self.y_min = -41.40
+        self.y_max = 33.42
         self.z_min = 0.0
         self.z_max = 9.30
         
@@ -518,10 +518,23 @@ class UavNavigationEnv(DirectRLEnv):
         self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
         self._prev_dist_to_goal = torch.zeros(self.num_envs, device=self.device)
 
-        # Curriculum state (global level, expanding spawn box).
-        self.curriculum_frac = self.cfg.curriculum_start_frac
+        # Curriculum state (discrete levels: each entry is (frac, center_x, center_y)).
+        # center=None means "map center" -> combined with frac=1.0 this spans the full map.
+        self._curriculum_schedule = [
+            (0.2, -10.0, -23.0),   # level 1
+            (0.3, -10.0, -4.0),   # level 2
+            (0.4, -10.0, -4.0),   # level 3
+            (0.5, -10.0, -4.0),   # level 4
+            (1.0, None, None),   # level 5  (full map)
+            (0.2, -10.0,  16.0),   # level 6
+            (0.3, -10.0,  16.0),   # level 7
+            (0.4, -10.0,  16.0),   # level 8
+            (0.5, -10.0,  16.0),   # level 9
+        ]
+        self._curr_level = 0
         self._curr_episodes = 0
         self._curr_successes = 0
+
         
         # True if the drone entered the goal sphere at any point this episode.
         self._reached_goal = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -546,6 +559,10 @@ class UavNavigationEnv(DirectRLEnv):
         # 3D occupancy / SVS map builder — owns global_occ_map & global_visit_counts
         self.autoencoder3D = autoencoder_3d(self)
 
+        # Static clearance field + free-cell list used to spawn collision-free.
+        self._build_spawn_clearance_field()
+
+
 
     def _load_policy_network(self):
         checkpoint = torch.load(
@@ -565,6 +582,50 @@ class UavNavigationEnv(DirectRLEnv):
         policy.to(self.device)
         policy.eval()
         return policy
+
+    def _build_spawn_clearance_field(self):
+        """Load the static warehouse occupancy map, downsample it to the env's
+        occ grid, and precompute (i) a metric clearance field to the nearest
+        OCCUPIED cell and (ii) the world centres of all cells that are both
+        clear (>= spawn_clearance) and inside the spawn band / inset bounds.
+        These are used to spawn drone and goal only in collision-free space."""
+        from scipy import ndimage
+
+        meta = np.load(self.cfg.occupancy_meta_path, allow_pickle=True).item()
+        src_cell = float(meta["cell_size"])                 # 0.05 m
+        cell = float(self.cfg.occ_cell_size)                # 0.25 m
+        f = int(round(cell / src_cell))                     # 5
+
+        occ_full = np.load(self.cfg.occupancy_map_path)     # (NZf, NYf, NXf) uint8, [z,y,x]
+        occ = (occ_full == 2)                               # only OCCUPIED counts as obstacle
+        NZf, NYf, NXf = occ.shape
+        NZ = -(-NZf // f); NY = -(-NYf // f); NX = -(-NXf // f)   # ceil division
+        occ = np.pad(occ, [(0, NZ * f - NZf), (0, NY * f - NYf), (0, NX * f - NXf)],
+                     mode="constant", constant_values=False)
+        occ_ds = occ.reshape(NZ, f, NY, f, NX, f).any(axis=(1, 3, 5))   # (NZ, NY, NX)
+
+        clearance = ndimage.distance_transform_edt(~occ_ds) * cell      # metres, [z,y,x]
+        field = torch.from_numpy(clearance).to(self.device).float()
+
+        zc = self.z_min + (torch.arange(NZ, device=self.device).float() + 0.5) * cell
+        yc = self.y_min + (torch.arange(NY, device=self.device).float() + 0.5) * cell
+        xc = self.x_min + (torch.arange(NX, device=self.device).float() + 0.5) * cell
+        gz, gy, gx = torch.meshgrid(zc, yc, xc, indexing="ij")
+
+        valid = (
+            (field >= self.cfg.spawn_clearance)
+            & (gz >= self.cfg.spawn_z_min) & (gz <= self.cfg.spawn_z_max)
+            & (gx >= self.x_min + 1.0) & (gx <= self.x_max - 1.0)
+            & (gy >= self.y_min + 1.0) & (gy <= self.y_max - 1.0)
+        )
+        self._free_xyz = torch.stack([gx[valid], gy[valid], gz[valid]], dim=1)   # (M, 3)
+        if self._free_xyz.shape[0] == 0:
+            raise RuntimeError(
+                "No free spawn cells found; check occupancy map path or lower spawn_clearance."
+            )
+        # print(f"[Spawn] {self._free_xyz.shape[0]} free spawn cells "
+        #       f"(clearance >= {self.cfg.spawn_clearance} m)")
+
 
     def _normalize_ll_obs(self, obs: torch.Tensor) -> torch.Tensor:
         normalized = (obs - self.ll_running_mean) / torch.sqrt(self.ll_running_variance + self.ll_epsilon)
@@ -600,42 +661,51 @@ class UavNavigationEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
         
     def _sample_drone_and_goal(self, n: int):
-        """Sample drone and goal in the curriculum box, with a min separation.
-        For the first two levels the box is offset off the central shelf into a
-        free aisle; from the third level on it uses the map center, since the box
-        is large and an offset would push samples outside the warehouse."""
-        frac = self.curriculum_frac
+        """Sample drone and goal from collision-free cells inside the current
+        curriculum box. The box is a fraction `frac` of the full map centred on
+        (cx, cy); z spans the full spawn band. Drawing from precomputed free
+        cells guarantees clearance >= spawn_clearance, so the drone survives the
+        first step. A min separation between drone and goal is enforced."""
+        
+        if self.cfg.eval_fixed_spawn_xy is not None:
+            fx, fy = self.cfg.eval_fixed_spawn_xy
+            fz = 0.5 * (self.cfg.spawn_z_min + self.cfg.spawn_z_max)
+            drone = torch.tensor([fx, fy, fz], device=self.device).unsqueeze(0).expand(n, 3).clone()
+            goal = drone.clone()   # goal == spawn -> drone hovers in place so you can inspect the area
+            return drone, goal
+        
+        frac, cx, cy = self._curriculum_schedule[self._curr_level]
+        if cx is None:
+            cx = 0.5 * ((self.x_min + 1.0) + (self.x_max - 1.0))
+        if cy is None:
+            cy = 0.5 * ((self.y_min + 1.0) + (self.y_max - 1.0))
 
-        use_offset = frac <= self.cfg.curriculum_start_frac + self.cfg.curriculum_step + 1e-6
-        cx = self.cfg.curriculum_center_x if use_offset else 0.5 * (self.x_min + self.x_max)
-        cy = self.cfg.curriculum_center_y if use_offset else 0.5 * (self.y_min + self.y_max)
+        hx = 0.5 * ((self.x_max - 1.0) - (self.x_min + 1.0)) * frac
+        hy = 0.5 * ((self.y_max - 1.0) - (self.y_min + 1.0)) * frac
+        xa, xb = max(cx - hx, self.x_min + 1.0), min(cx + hx, self.x_max - 1.0)
+        ya, yb = max(cy - hy, self.y_min + 1.0), min(cy + hy, self.y_max - 1.0)
 
-        def axis(lo, hi, center):
-            h = 0.5 * (hi - lo) * frac
-            return torch.empty(n, device=self.device).uniform_(center - h, center + h)
+        fx = self._free_xyz[:, 0]
+        fy = self._free_xyz[:, 1]
+        in_box = (fx >= xa) & (fx <= xb) & (fy >= ya) & (fy <= yb)
+        pool = self._free_xyz[in_box]
+        if pool.shape[0] == 0:
+            pool = self._free_xyz   # fallback: no free cell in box -> draw from whole map
 
-        def fixed_axis(lo, hi):
-            return torch.empty(n, device=self.device).uniform_(lo, hi)
+        def draw(m):
+            sel = torch.randint(pool.shape[0], (m,), device=self.device)
+            return pool[sel].clone()
 
-        def sample_box():
-            return torch.stack(
-                [axis(self.x_min + 1.0, self.x_max - 1.0, cx),
-                 axis(self.y_min + 1.0, self.y_max - 1.0, cy),
-                 fixed_axis(self.cfg.spawn_z_min, self.cfg.spawn_z_max)],
-                dim=1,
-            )
-
-        drone = sample_box()
-        goal = drone.clone()
-        too_close = torch.ones(n, dtype=torch.bool, device=self.device)
+        drone = draw(n)
+        goal = draw(n)
+        too_close = torch.linalg.norm(goal - drone, dim=1) < self.cfg.min_goal_separation
         for _ in range(self.cfg.curriculum_max_resample):
             if not too_close.any():
                 break
-            cand = sample_box()
-            goal[too_close] = cand[too_close]
-            dist = torch.linalg.norm(goal - drone, dim=1)
-            too_close = dist < self.cfg.min_goal_separation
+            goal[too_close] = draw(int(too_close.sum().item()))
+            too_close = torch.linalg.norm(goal - drone, dim=1) < self.cfg.min_goal_separation
         return drone, goal
+
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._prev_actions = self._actions.clone()
@@ -669,6 +739,11 @@ class UavNavigationEnv(DirectRLEnv):
         self.autoencoder3D._update_visit_counts()
         
         pos_w = self._robot.data.root_pos_w
+
+        # if self.common_step_counter < 3:
+        #     print(f"[SPAWN] actual root_pos_w[0] = ("
+        #           f"{pos_w[0,0]:.2f}, {pos_w[0,1]:.2f}, {pos_w[0,2]:.2f})")
+
         self.distance_to_bounds_x = (pos_w[:, 0] > self.x_min + 0.3) & (pos_w[:, 0] < self.x_max - 0.3)
         self.distance_to_bounds_y = (pos_w[:, 1] > self.y_min + 0.3) & (pos_w[:, 1] < self.y_max - 0.3)
 
@@ -891,7 +966,7 @@ class UavNavigationEnv(DirectRLEnv):
             dim=1,
         )
 
-        # ── Curriculum: count successes among ended episodes, grow the box ───
+        # ── Curriculum: count successes among ended episodes, advance level ───
         ended_mask = self.reset_terminated[env_ids] | self.reset_time_outs[env_ids]
         n_ended = int(ended_mask.sum().item())
         if n_ended > 0:
@@ -901,12 +976,13 @@ class UavNavigationEnv(DirectRLEnv):
             if self._curr_episodes >= self.cfg.curriculum_window:
                 success_rate = self._curr_successes / max(self._curr_episodes, 1)
                 if success_rate >= self.cfg.curriculum_success_threshold:
-                    self.curriculum_frac = min(
-                        self.curriculum_frac + self.cfg.curriculum_step,
-                        self.cfg.curriculum_max_frac,
+                    self._curr_level = min(
+                        self._curr_level + 1,
+                        len(self._curriculum_schedule) - 1,
                     )
                 self._curr_episodes = 0
                 self._curr_successes = 0
+
 
         self._episode_sums["final_distance_to_goal"][env_ids] = terminal_distance * self.max_episode_length_s
 
@@ -925,7 +1001,8 @@ class UavNavigationEnv(DirectRLEnv):
             self._episode_sums[key][env_ids] = 0.0
 
         self.extras["log"].update(extras)
-        self.extras["log"]["Curriculum/frac"] = torch.tensor(self.curriculum_frac, device=self.device)
+        self.extras["log"]["Curriculum/level"] = torch.tensor(float(self._curr_level + 1), device=self.device)
+        self.extras["log"]["Curriculum/frac"] = torch.tensor(float(self._curriculum_schedule[self._curr_level][0]), device=self.device)
         n_reset = max(len(env_ids), 1)
         self.extras["log"]["Episode_Termination/died"] = torch.tensor(num_deaths / n_reset, device=self.device)
         self.extras["log"]["Episode_Termination/time_out"] = torch.tensor(num_timeouts / n_reset, device=self.device)
@@ -963,6 +1040,16 @@ class UavNavigationEnv(DirectRLEnv):
         # default_root_state[:, 1] = dy
         # default_root_state[:, 2] = dz
         drone_pos, goal_pos = self._sample_drone_and_goal(len(env_ids))
+        # # ── DEBUG: commanded spawn position ───────────────────────────────────
+        # for k in range(len(env_ids)):
+        #     ei = int(env_ids[k])
+        #     eo = self.scene.env_origins[ei]
+        #     print(f"[SPAWN] env {ei}: cmd_world=("
+        #           f"{drone_pos[k,0]:.2f}, {drone_pos[k,1]:.2f}, {drone_pos[k,2]:.2f})  "
+        #           f"goal=({goal_pos[k,0]:.2f}, {goal_pos[k,1]:.2f}, {goal_pos[k,2]:.2f})  "
+        #           f"env_origin=({eo[0]:.2f}, {eo[1]:.2f}, {eo[2]:.2f})")
+
+        
         self._desired_pos_w[env_ids] = goal_pos
         self._prev_dist_to_goal[env_ids] = torch.linalg.norm(goal_pos - drone_pos, dim=1)
 

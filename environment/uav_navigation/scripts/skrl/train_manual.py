@@ -200,7 +200,7 @@ def main(env_cfg, agent_cfg: dict):
 
     # ── 6. Trainer ────────────────────────────────────────────────────
     rollouts = sweep_cfg.get("rollouts", 64)
-    default_timesteps = 1000000
+    default_timesteps = 2000000
     trainer_cfg = {
         "timesteps": args_cli.max_iterations * rollouts if args_cli.max_iterations else default_timesteps,
         "headless": True,

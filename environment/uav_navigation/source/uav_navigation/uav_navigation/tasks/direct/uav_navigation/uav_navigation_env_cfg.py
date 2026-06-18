@@ -78,7 +78,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     terrain: TerrainImporterCfg = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="usd",
-        usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/warehouse_multiple_shelves.usd",
+        usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/full_warehouse.usd",
         collision_group=1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -106,7 +106,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=20, env_spacing=2.5, replicate_physics=True
+        num_envs=15, env_spacing=2.5, replicate_physics=True
     )
 
     # robot
@@ -196,14 +196,19 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     exploration_stop: float = 2.0
 
     # ── Curriculum: expanding spawn box for drone and goal ───────────────
-    curriculum_start_frac: float = 0.2      # initial fraction of the full box
-    curriculum_max_frac: float = 1.0
-    curriculum_step: float = 0.1             # frac increment per level-up
     curriculum_window: int = 100             # completed episodes per evaluation
     curriculum_success_threshold: float = 0.70
     min_goal_separation: float = 1.5         # min drone-goal distance at spawn (> goal_radius)
     curriculum_max_resample: int = 10        # resample tries to satisfy separation
-    curriculum_center_x: float = 3.0   # free-aisle center, first two levels only
-    curriculum_center_y: float = 1.4
     spawn_z_min: float = 1.0           # aisle altitude band
-    spawn_z_max: float = 2.5
+    spawn_z_max: float = 8.0
+
+
+    spawn_clearance: float = 0.5            # required clearance (m) from obstacles at spawn (> collision_distance)
+    occupancy_map_path: str = "/workspace/environment/uav_navigation/source/uav_navigation/uav_navigation/tasks/direct/uav_navigation/occupancy_3d.npy"
+    occupancy_meta_path: str = "/workspace/environment/uav_navigation/source/uav_navigation/uav_navigation/tasks/direct/uav_navigation/occupancy_3d_meta.npy"
+
+    # Evaluation override: if set to (x, y), force the drone spawn to this world
+    # position (z = middle of the spawn band) instead of curriculum sampling.
+    # Leave None for normal training.
+    eval_fixed_spawn_xy: tuple | None = None
