@@ -35,22 +35,17 @@ and run it with:
 
 # Short explaination of the folder utility
 
-    - quadcopter_vel_control -> is the project used for the training of the low-level control, that is the velocity control (python scripts/skrl/train_manual.py --         task=Template-Quadcopter_Vel_Control-Direct-v0 --enable_cameras --headless)
+    - quadcopter_vel_control -> is the project used for the training of the low-level control, that is the velocity control (python scripts/skrl/train_manual.py --task=Template-Quadcopter_Vel_Control-Direct-v0 --enable_cameras --headless)
     
-    - quadcopter_hierarchical_control -> is the for position controller that use the velocity control to reach desired position in the env                                  (python scripts/skrl/train_manual.py --task=Template-Quadcopter_Hierarchical_Control-Direct-v0 --enable_cameras --headless)
+    - quadcopter_hierarchical_control -> is the for position controller that use the velocity control to reach desired position in the env (python scripts/skrl/train_manual.py --task=Template-Quadcopter_Hierarchical_Control-Direct-v0 --enable_cameras --headless)
     
-    - quadcopter_rnn -> Firstly it was used to test the RNN implementation, then it has become the environment used to collect OCC+SVS maps. The command to                 run to get maps is: python scripts/skrl/collect_occ_svs_dataset.py --task=Template-Quadcopter-Rnn-Direct-v0                                                           --checkpoint=/workspace/environment/quadcopter_hierarchical_control/runs/manual_run/cosmic-smoke-232/26-05-18_14-18-46-704539_PPO/checkpoints/best_agent.pt           --num_envs=3 --target_samples=1000 --seed=-1 --headless
+    - quadcopter_rnn -> Firstly it was used to test the RNN implementation, then it has become the environment used to collect OCC+SVS maps. The command to run to get maps is: python scripts/skrl/collect_occ_svs_dataset.py --task=Template-Quadcopter-Rnn-Direct-v0 --checkpoint=/workspace/environment/quadcopter_hierarchical_control/runs/manual_run/cosmic-smoke-232/26-05-18_14-18-46-704539_PPO/checkpoints/best_agent.pt --num_envs=3 --target_samples=1000 --seed=-1 --headless
 
-    - QuadcopterVae -> It contains the setup to test validity of the VAE in simulation and it was used to collect depth dataset for VAE training. The command to run        to collect dataset is: python source/QuadcopterVae/QuadcopterVae/tasks/direct/quadcoptervae/collect_depth_dataset.py
-      --num_envs=20
-      --num_samples=5000
-      --output_dir=/workspace/vae_container/Vae/isaaclab_dataset_right_size
-      --enable_cameras
-      --headless
+    - QuadcopterVae -> It contains the setup to test validity of the VAE in simulation and it was used to collect depth dataset for VAE training. The command to run to collect dataset is: python source/QuadcopterVae/QuadcopterVae/tasks/direct/quadcoptervae/collect_depth_dataset.py --num_envs=20  --num_samples=5000 --output_dir=/workspace/vae_container/Vae/isaaclab_dataset_right_size   --enable_cameras  --headless
 
     - uav_navigation -> full pipeline. See below.
 
-    - vae_container -> Container used for ML section. It contains the VAE and 3D-AE architectures (vae_residual_batch.py and autoencoder3d.py) and the training file        runnable by wandb agent:
+    - vae_container -> Container used for ML section. It contains the VAE and 3D-AE architectures (vae_residual_batch.py and autoencoder3d.py) and the training file runnable by wandb agent:
           - wandb sweep --project vae_training config.yaml or wandb sweep --project 3d_ae_training config_3d.yaml and then by copying and pasting the yellow sentence
 
 # RL PROJECT SECTION
