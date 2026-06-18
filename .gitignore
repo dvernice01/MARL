@@ -29,7 +29,9 @@ environment/uav_navigation/wandb/
 environment/uav_navigation/runs/
 environment/uav_navigation/logs/
 
-
+environment/quadcopter/
+environment/low_level_control/
+environment/isaac_lab_tutorial/
 
 # --- Simulation & Video (Isaac Lab / Isaac Sim) ---
 _isaac_sim/
