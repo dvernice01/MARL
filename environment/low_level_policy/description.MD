@@ -1,3 +1,0 @@
-This folder contains the low-level policy for the position controller. It is a neural network that takes as input its state + commands and outputs the actions to be sent to the robot.
-
-You have all code reproducibility, this can help to see the training frequencies employed. In this case, the low-level policy is trained with a physics frequency of 120 Hz and an action frequency of 60 Hz (decimation=2). This will help you set the decimation factor in the high-level policy.
