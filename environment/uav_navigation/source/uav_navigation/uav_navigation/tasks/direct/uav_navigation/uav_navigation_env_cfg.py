@@ -182,12 +182,12 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     # ── Goal-distance reward (Kulkarni & Alexis 2024, eq. 2) ─────────────
     # r1, r2: two Gaussian kernels exp(-d^2/nu) at different widths
     goal_nu1: float = 4.0            # narrow: fine final approach (~1-2 m)
-    goal_nu2: float = 100.0          # broad: long-range pull (meaningful at 10-20 m)
-    goal_lambda1: float = 10.0
+    goal_nu2: float = 16.0          # broad: long-range pull (meaningful at 10-20 m)
+    goal_lambda1: float = 15.0
     goal_lambda2: float = 10.0
     # r3: linear normalized proximity 1 - d/nu3 (nu3 >= map diagonal ~47 m)
-    goal_nu3: float = 47.0
-    goal_lambda3: float = 10.0
+    # goal_nu3: float = 47.0
+    # goal_lambda3: float = 10.0
     # r4: progress / delta-distance reward, weight on (d_{t-1} - d_t)
     goal_progress_scale: float = 30.0
 
@@ -212,3 +212,10 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     # position (z = middle of the spawn band) instead of curriculum sampling.
     # Leave None for normal training.
     eval_fixed_spawn_xy: tuple | None = None
+
+    goal_success_thresholds: tuple = (5.0, 4.0, 3.0, 2.0, 1.0)
+    goal_success_scale: float = 5.0     # one-time per crossing; not multiplied by step_dt
+    curriculum_near_radius: float = 2.5
+    curriculum_near_levels: int = 2
+
+

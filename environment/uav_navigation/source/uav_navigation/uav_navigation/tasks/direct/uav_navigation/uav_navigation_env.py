@@ -493,6 +493,7 @@ class UavNavigationEnv(DirectRLEnv):
                 "life",
                 "distance_to_obstacles",
                 "exploration",
+                "success",
                 "action_reg_diff",
                 "final_distance_to_goal",
                 "mean_dist_to_obstacle",   
@@ -562,6 +563,10 @@ class UavNavigationEnv(DirectRLEnv):
         # Static clearance field + free-cell list used to spawn collision-free.
         self._build_spawn_clearance_field()
 
+        self._success_thresholds = torch.tensor(self.cfg.goal_success_thresholds, device=self.device)
+        self._success_claimed = torch.zeros(
+            self.num_envs, len(self.cfg.goal_success_thresholds), dtype=torch.bool, device=self.device
+        )
 
 
     def _load_policy_network(self):
@@ -661,50 +666,53 @@ class UavNavigationEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
         
     def _sample_drone_and_goal(self, n: int):
-        """Sample drone and goal from collision-free cells inside the current
-        curriculum box. The box is a fraction `frac` of the full map centred on
-        (cx, cy); z spans the full spawn band. Drawing from precomputed free
-        cells guarantees clearance >= spawn_clearance, so the drone survives the
-        first step. A min separation between drone and goal is enforced."""
-        
-        if self.cfg.eval_fixed_spawn_xy is not None:
-            fx, fy = self.cfg.eval_fixed_spawn_xy
-            fz = 0.5 * (self.cfg.spawn_z_min + self.cfg.spawn_z_max)
-            drone = torch.tensor([fx, fy, fz], device=self.device).unsqueeze(0).expand(n, 3).clone()
-            goal = drone.clone()   # goal == spawn -> drone hovers in place so you can inspect the area
+        frac, cx_sched, cy_sched = self._curriculum_schedule[self._curr_level]
+
+        cx = cx_sched if cx_sched is not None else 0.5 * (self.x_min + self.x_max)
+        cy = cy_sched if cy_sched is not None else 0.5 * (self.y_min + self.y_max)
+
+        near_spawn = self._curr_level < self.cfg.curriculum_near_levels
+
+        def axis(lo, hi, center):
+            h = 0.5 * (hi - lo) * frac
+            return torch.empty(n, device=self.device).uniform_(center - h, center + h)
+
+        def fixed_axis(lo, hi):
+            return torch.empty(n, device=self.device).uniform_(lo, hi)
+
+        def sample_box():
+            return torch.stack(
+                [axis(self.x_min + 1.0, self.x_max - 1.0, cx),
+                 axis(self.y_min + 1.0, self.y_max - 1.0, cy),
+                 fixed_axis(self.cfg.spawn_z_min, self.cfg.spawn_z_max)],
+                dim=1,
+            )
+
+        drone = sample_box()
+
+        if near_spawn:
+            R = self.cfg.curriculum_near_radius
+            direction = torch.randn(n, 3, device=self.device)
+            direction = direction / direction.norm(dim=1, keepdim=True).clamp(min=1e-6)
+            magnitude = torch.empty(n, device=self.device).uniform_(self.cfg.min_goal_separation, R)
+            goal = drone + direction * magnitude.unsqueeze(1)
+            goal[:, 0] = goal[:, 0].clamp(self.x_min + 1.0, self.x_max - 1.0)
+            goal[:, 1] = goal[:, 1].clamp(self.y_min + 1.0, self.y_max - 1.0)
+            goal[:, 2] = goal[:, 2].clamp(self.cfg.spawn_z_min, self.cfg.spawn_z_max)
             return drone, goal
-        
-        frac, cx, cy = self._curriculum_schedule[self._curr_level]
-        if cx is None:
-            cx = 0.5 * ((self.x_min + 1.0) + (self.x_max - 1.0))
-        if cy is None:
-            cy = 0.5 * ((self.y_min + 1.0) + (self.y_max - 1.0))
 
-        hx = 0.5 * ((self.x_max - 1.0) - (self.x_min + 1.0)) * frac
-        hy = 0.5 * ((self.y_max - 1.0) - (self.y_min + 1.0)) * frac
-        xa, xb = max(cx - hx, self.x_min + 1.0), min(cx + hx, self.x_max - 1.0)
-        ya, yb = max(cy - hy, self.y_min + 1.0), min(cy + hy, self.y_max - 1.0)
-
-        fx = self._free_xyz[:, 0]
-        fy = self._free_xyz[:, 1]
-        in_box = (fx >= xa) & (fx <= xb) & (fy >= ya) & (fy <= yb)
-        pool = self._free_xyz[in_box]
-        if pool.shape[0] == 0:
-            pool = self._free_xyz   # fallback: no free cell in box -> draw from whole map
-
-        def draw(m):
-            sel = torch.randint(pool.shape[0], (m,), device=self.device)
-            return pool[sel].clone()
-
-        drone = draw(n)
-        goal = draw(n)
-        too_close = torch.linalg.norm(goal - drone, dim=1) < self.cfg.min_goal_separation
+        # Later levels: independent goal in the box, with a minimum separation.
+        goal = drone.clone()
+        too_close = torch.ones(n, dtype=torch.bool, device=self.device)
         for _ in range(self.cfg.curriculum_max_resample):
             if not too_close.any():
                 break
-            goal[too_close] = draw(int(too_close.sum().item()))
-            too_close = torch.linalg.norm(goal - drone, dim=1) < self.cfg.min_goal_separation
+            cand = sample_box()
+            goal[too_close] = cand[too_close]
+            dist = torch.linalg.norm(goal - drone, dim=1)
+            too_close = dist < self.cfg.min_goal_separation
         return drone, goal
+
 
 
     def _pre_physics_step(self, actions: torch.Tensor):
@@ -875,19 +883,22 @@ class UavNavigationEnv(DirectRLEnv):
         ang_vel = 1 - torch.tanh(ang_vel_sum / 0.8)
         # ── Goal-distance reward (Kulkarni & Alexis 2024, eq. 2) ──────────────
         d = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
-        prev_d = self._prev_dist_to_goal                         
+        prev_d = self._prev_dist_to_goal
 
-        r1 = torch.exp(-(d ** 2) / self.cfg.goal_nu1)            # narrow Gaussian
-        r2 = torch.exp(-(d ** 2) / self.cfg.goal_nu2)            # broad Gaussian
-        r3 = 1.0 - torch.clamp(d / self.cfg.goal_nu3, 0.0, 1.0)  # normalized linear
+        r1 = torch.exp(-(d ** 2) / self.cfg.goal_nu1)            # narrow Gaussian (final approach)
+        r2 = torch.exp(-(d ** 2) / self.cfg.goal_nu2)            # medium Gaussian (working-range pull)
         r4 = prev_d - d                                          # progress (>0 approaching)
 
         distance_to_goal_reward = (
             self.cfg.goal_lambda1 * r1
             + self.cfg.goal_lambda2 * r2
-            + self.cfg.goal_lambda3 * r3
             + self.cfg.goal_progress_scale * r4
         )
+
+        inside = d.unsqueeze(1) < self._success_thresholds.unsqueeze(0)   # (N, K)
+        newly_crossed = inside & (~self._success_claimed)                 # (N, K)
+        success = newly_crossed.float().sum(dim=1)                        # (N,)
+        self._success_claimed = self._success_claimed | inside
 
         action_diff = self._actions - self._prev_actions
         action_reg_diff = torch.norm(action_diff, p=2, dim=-1)
@@ -919,6 +930,8 @@ class UavNavigationEnv(DirectRLEnv):
             "life":                     life * self.step_dt,
             "distance_to_obstacles":    dist_to_obs_reward * self.cfg.distance_to_obstacles_reward_scale * self.step_dt,
             "exploration":              exploration_reward * self.cfg.exploration_reward_scale * self.step_dt,
+            "success":                  success * self.cfg.goal_success_scale,
+  
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         for key, value in rewards.items():
@@ -1052,6 +1065,10 @@ class UavNavigationEnv(DirectRLEnv):
         
         self._desired_pos_w[env_ids] = goal_pos
         self._prev_dist_to_goal[env_ids] = torch.linalg.norm(goal_pos - drone_pos, dim=1)
+
+        self._success_claimed[env_ids] = (
+            self._prev_dist_to_goal[env_ids].unsqueeze(1) < self._success_thresholds.unsqueeze(0)
+        )
 
         default_root_state[:, 0] = drone_pos[:, 0]
         default_root_state[:, 1] = drone_pos[:, 1]

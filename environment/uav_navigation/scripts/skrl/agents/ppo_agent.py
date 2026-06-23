@@ -201,6 +201,7 @@ DEFAULT_PPO_CONFIG = {
     "learning_rate_scheduler_kwargs": {
         "kl_threshold": 0.016,
         "min_lr": 1.0e-04,
+        "max_lr": 5.0e-04,
     },
     "state_preprocessor": RunningStandardScaler,
     "state_preprocessor_kwargs": {},
