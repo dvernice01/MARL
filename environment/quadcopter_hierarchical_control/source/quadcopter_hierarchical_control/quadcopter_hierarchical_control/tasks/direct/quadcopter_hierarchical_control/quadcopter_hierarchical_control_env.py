@@ -59,8 +59,6 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
                 "ang_vel",
                 "distance_to_goal",
                 "life",
-                "died",
-                "time_out",
                 "action_reg_diff",
                 "final_distance_to_goal",
             ]
@@ -224,7 +222,7 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
         action_reg_diff = 1 - torch.tanh(action_reg_diff / 0.8) # (num_envs,)
         is_alive = torch.logical_and(self.distance_to_bounds_x >= 0.0, self.distance_to_bounds_y >= 0.0)
         life = torch.where(is_alive, 
-                        self.cfg.alive_reward_scale, 
+                        self.cfg.alive_reward_scale * self.step_dt, 
                         self.cfg.death_reward_scale)
 
         rewards = {
@@ -232,7 +230,7 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
             "action_reg_diff": action_reg_diff * self.cfg.rew_scale_action_reg * self.step_dt,
-            "life": life * self.step_dt,
+            "life": life,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
@@ -257,8 +255,8 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
         num_deaths = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         num_timeouts = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         
-        self._episode_sums["died"] += num_deaths   
-        self._episode_sums["time_out"] += num_timeouts
+        num_deaths           = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+        num_timeouts         = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         #self._episode_sums["world pos z"] += self._robot.data.root_pos_w[:, 2] * self.step_dt
         #self._episode_sums["distance to bound x"] += self.distance_to_bounds_x * self.step_dt
         #self._episode_sums["distance to bound y"] += self.distance_to_bounds_y * self.step_dt
@@ -275,14 +273,15 @@ class QuadcopterHierarchicalControlEnv(DirectRLEnv):
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
             # Separate actual reward components from diagnostic metrics
-            if key in ["died", "time_out"]:
-                extras["Episode_Termination/" + key] = episodic_sum_avg / self.max_episode_length_s
-            elif key in ["final_distance_to_goal"]:
+            if key in ["final_distance_to_goal"]:
                 extras["Episode_Info/" + key] = episodic_sum_avg 
             else:
                 extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0  # azzerato DOPO aver letto
         self.extras["log"].update(extras)
+        n_reset = max(len(env_ids), 1)
+        self.extras["log"]["Episode_Termination/died"] = torch.tensor(num_deaths / n_reset, device=self.device)
+        self.extras["log"]["Episode_Termination/time_out"] = torch.tensor(num_timeouts / n_reset, device=self.device)
 
         #RESET DEGLI ENVIRONMENTS
         super()._reset_idx(env_ids)
