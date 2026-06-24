@@ -874,20 +874,24 @@ class UavNavigationEnv(DirectRLEnv):
 
 
     def _get_rewards(self) -> torch.Tensor:
-        
+
         self._episode_sums["mean_dist_to_obstacle"] += self._dist_to_obstacle_cache * self.step_dt
         origins = self.scene.env_origins
+
+        # ── Velocity regularization (exp reward, in [0, 1]) ───────────────────
         lin_vel_sum = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel_sum = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
-        lin_vel = 1 - torch.tanh(lin_vel_sum / 0.8)
-        ang_vel = 1 - torch.tanh(ang_vel_sum / 0.8)
-        # ── Goal-distance reward (Kulkarni & Alexis 2024, eq. 2) ──────────────
+        lin_vel = torch.exp(-lin_vel_sum / self.cfg.lin_vel_tau)
+        ang_vel = torch.exp(-ang_vel_sum / self.cfg.ang_vel_tau)
+
+        # ── Goal-distance reward ──────────────────────────────────────────────
         d = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         prev_d = self._prev_dist_to_goal
 
-        r1 = torch.exp(-(d ** 2) / self.cfg.goal_nu1)            # narrow Gaussian (final approach)
-        r2 = torch.exp(-(d ** 2) / self.cfg.goal_nu2)            # medium Gaussian (working-range pull)
-        r4 = prev_d - d                                          # progress (>0 approaching)
+        r1 = torch.exp(-(d ** 2) / self.cfg.goal_nu1)           # narrow Gaussian, reward in [0, 1]
+        r2 = torch.exp(-(d ** 2) / self.cfg.goal_nu2)           # medium Gaussian, reward in [0, 1]
+        # raw progress (>0 approaching), only clamped to [-1, 1] as a safety guard.
+        r4 = torch.clamp(prev_d - d, -1.0, 1.0)
 
         distance_to_goal_reward = (
             self.cfg.goal_lambda1 * r1
@@ -900,10 +904,11 @@ class UavNavigationEnv(DirectRLEnv):
         success = newly_crossed.float().sum(dim=1)                        # (N,)
         self._success_claimed = self._success_claimed | inside
 
+        # ── Action regularization (exp reward, in [0, 1]) ─────────────────────
         action_diff = self._actions - self._prev_actions
-        action_reg_diff = torch.norm(action_diff, p=2, dim=-1)
-        action_reg_diff = 1 - torch.tanh(action_reg_diff / 0.8)
-        
+        action_reg_norm = torch.norm(action_diff, p=2, dim=-1)
+        action_reg_diff = torch.exp(-action_reg_norm / self.cfg.action_reg_tau)
+
         is_alive_bounds    = torch.logical_and(self.distance_to_bounds_x, self.distance_to_bounds_y)
         is_alive_height    = torch.logical_and(
             self._robot.data.root_pos_w[:, 2] > self.z_min,
@@ -911,13 +916,13 @@ class UavNavigationEnv(DirectRLEnv):
         )
         is_alive_collision = self._dist_to_obstacle_cache > self.cfg.collision_distance
         is_alive = is_alive_bounds & is_alive_height & is_alive_collision
-        life = torch.where(is_alive, self.cfg.alive_reward_scale, self.cfg.death_reward_scale)
-        
-        # ── Distance to obstacles ─────────────────────────────────────────
-        dist_to_obs_reward = torch.tanh(self._min_depth_cache / self.cfg.safety_radius)
+        life = torch.where(is_alive, self.cfg.alive_reward_scale * self.step_dt, self.cfg.death_reward_scale)
+
+        # ── Distance to obstacles (exp penalty, in [-1, 0]) ──────────────────
+        dist_to_obs_reward = -torch.exp(-self._min_depth_cache / self.cfg.safety_radius)
+        # ── Exploration (exp reward, in [0, 1]) ──────────────────────────────
         exploration_reward = (
-            self.cfg.exploration_gamma
-            * torch.exp(-self.cfg.exploration_delta * self._Nt_cache)
+            torch.exp(-self.cfg.exploration_delta * self._Nt_cache)
             * (d >= self.cfg.exploration_stop).float()
         )
         # se si è vicini alla posizione obiettivo, non incentivare più l'esplorazione, altrimenti il drone potrebbe essere tentato di allontanarsi per esplorare nuove celle.
@@ -927,19 +932,20 @@ class UavNavigationEnv(DirectRLEnv):
             "ang_vel":                  ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal":         distance_to_goal_reward * self.step_dt,
             "action_reg_diff":          action_reg_diff * self.cfg.rew_scale_action_reg * self.step_dt,
-            "life":                     life * self.step_dt,
+            "life":                     life,
             "distance_to_obstacles":    dist_to_obs_reward * self.cfg.distance_to_obstacles_reward_scale * self.step_dt,
             "exploration":              exploration_reward * self.cfg.exploration_reward_scale * self.step_dt,
             "success":                  success * self.cfg.goal_success_scale,
-  
+
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         for key, value in rewards.items():
             self._episode_sums[key] += value
-        
+
         self._prev_dist_to_goal = d.clone()
 
         return reward
+
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
@@ -966,6 +972,8 @@ class UavNavigationEnv(DirectRLEnv):
             self.reset_terminated[env_ids] &
             (self._dist_to_obstacle_cache[env_ids] < self.cfg.collision_distance)
         ).sum().item())
+
+
 
         cells_visited_per_env = (
             self.autoencoder3D.global_visit_counts[env_ids] > 0
@@ -1020,6 +1028,16 @@ class UavNavigationEnv(DirectRLEnv):
         self.extras["log"]["Episode_Termination/died"] = torch.tensor(num_deaths / n_reset, device=self.device)
         self.extras["log"]["Episode_Termination/time_out"] = torch.tensor(num_timeouts / n_reset, device=self.device)
         self.extras["log"]["Episode_Termination/died_collision"] = torch.tensor(num_deaths_collision / n_reset, device=self.device)
+
+        coll_mask = self.reset_terminated[env_ids] & (
+            self._dist_to_obstacle_cache[env_ids] < self.cfg.collision_distance
+        )
+        if coll_mask.any():
+            z_death   = self._robot.data.root_pos_w[env_ids][coll_mask, 2]
+            len_death = self.episode_length_buf[env_ids][coll_mask].float()
+            self.extras["log"]["Debug/coll_z_mean"]   = z_death.mean()
+            self.extras["log"]["Debug/coll_steplen"]  = len_death.mean()
+
 
         super()._reset_idx(env_ids)
         if len(env_ids) == self.num_envs:

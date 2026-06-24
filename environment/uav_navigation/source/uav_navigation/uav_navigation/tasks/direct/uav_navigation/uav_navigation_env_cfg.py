@@ -124,7 +124,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     safety_radius: float = 0.2                          
    
     # ── Exploration (PDF-style v_t = γ·exp(-δ·N_t)) ──────────────────────
-    exploration_gamma: float = 0.1
+    #exploration_gamma: float = 0.1
     exploration_delta: float = 0.01
 
     # ── Collision termination ─────────────────────────────────────────────
@@ -178,6 +178,10 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     distance_to_obstacles_reward_scale = 0.0
     exploration_reward_scale = 0.1
 
+    # ── Exponential normalization time-constants (reward shaping) ────────
+    lin_vel_tau: float = 0.8
+    ang_vel_tau: float = 0.8
+    action_reg_tau: float = 0.8
 
     # ── Goal-distance reward (Kulkarni & Alexis 2024, eq. 2) ─────────────
     # r1, r2: two Gaussian kernels exp(-d^2/nu) at different widths
