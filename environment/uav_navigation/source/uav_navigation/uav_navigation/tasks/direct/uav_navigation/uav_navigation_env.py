@@ -690,6 +690,11 @@ class UavNavigationEnv(DirectRLEnv):
 
         drone = sample_box()
 
+        if self.cfg.eval_fixed_spawn_xy is not None:
+            drone[:, 0] = self.cfg.eval_fixed_spawn_xy[0]
+            drone[:, 1] = self.cfg.eval_fixed_spawn_xy[1]
+            drone[:, 2] = 0.5 * (self.cfg.spawn_z_min + self.cfg.spawn_z_max)
+
         if near_spawn:
             R = self.cfg.curriculum_near_radius
             direction = torch.randn(n, 3, device=self.device)
@@ -921,10 +926,9 @@ class UavNavigationEnv(DirectRLEnv):
         # ── Distance to obstacles (exp penalty, in [-1, 0]) ──────────────────
         dist_to_obs_reward = -torch.exp(-self._min_depth_cache / self.cfg.safety_radius)
         # ── Exploration (exp reward, in [0, 1]) ──────────────────────────────
-        exploration_reward = (
-            torch.exp(-self.cfg.exploration_delta * self._Nt_cache)
-            * (d >= self.cfg.exploration_stop).float()
-        )
+        exploration_reward = torch.exp(-self.cfg.exploration_delta * self._Nt_cache)
+        
+
         # se si è vicini alla posizione obiettivo, non incentivare più l'esplorazione, altrimenti il drone potrebbe essere tentato di allontanarsi per esplorare nuove celle.
 
         rewards = {

@@ -184,7 +184,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
-    env_cfg.eval_fixed_spawn_xy = (-10, -16)
+    env_cfg.eval_fixed_spawn_xy = (-10.0, -4.0)
     # Make the render/recording camera follow the drone
     env_cfg.viewer.origin_type = "asset_root"
     env_cfg.viewer.asset_name = "robot"

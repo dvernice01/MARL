@@ -187,7 +187,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     # r1, r2: two Gaussian kernels exp(-d^2/nu) at different widths
     goal_nu1: float = 4.0            # narrow: fine final approach (~1-2 m)
     goal_nu2: float = 16.0          # broad: long-range pull (meaningful at 10-20 m)
-    goal_lambda1: float = 15.0
+    goal_lambda1: float = 50.0
     goal_lambda2: float = 10.0
     # r3: linear normalized proximity 1 - d/nu3 (nu3 >= map diagonal ~47 m)
     # goal_nu3: float = 47.0
@@ -196,8 +196,8 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     goal_progress_scale: float = 30.0
 
     # ── Goal reaching / success ──────────────────────────────────────────
-    goal_radius: float = 1.0
-    exploration_stop: float = 2.0
+    goal_radius: float = 2.5
+    exploration_stop: float = 1.0
 
     # ── Curriculum: expanding spawn box for drone and goal ───────────────
     curriculum_window: int = 100             # completed episodes per evaluation
