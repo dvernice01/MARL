@@ -892,17 +892,18 @@ class UavNavigationEnv(DirectRLEnv):
         # ── Goal-distance reward ──────────────────────────────────────────────
         d = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         prev_d = self._prev_dist_to_goal
+        distance_to_goal_mapped = 1 - torch.tanh(self.final_distance_to_goal / 0.8)
 
-        r1 = torch.exp(-(d ** 2) / self.cfg.goal_nu1)           # narrow Gaussian, reward in [0, 1]
-        r2 = torch.exp(-(d ** 2) / self.cfg.goal_nu2)           # medium Gaussian, reward in [0, 1]
-        # raw progress (>0 approaching), only clamped to [-1, 1] as a safety guard.
-        r4 = torch.clamp(prev_d - d, -1.0, 1.0)
+        # r1 = torch.exp(-(d ** 2) / self.cfg.goal_nu1)           # narrow Gaussian, reward in [0, 1]
+        # r2 = torch.exp(-(d ** 2) / self.cfg.goal_nu2)           # medium Gaussian, reward in [0, 1]
+        # # raw progress (>0 approaching), only clamped to [-1, 1] as a safety guard.
+        # r4 = torch.clamp(prev_d - d, -1.0, 1.0)
 
-        distance_to_goal_reward = (
-            self.cfg.goal_lambda1 * r1
-            + self.cfg.goal_lambda2 * r2
-            + self.cfg.goal_progress_scale * r4
-        )
+        # distance_to_goal_reward = (
+        #     self.cfg.goal_lambda1 * r1
+        #     + self.cfg.goal_lambda2 * r2
+        #     + self.cfg.goal_progress_scale * r4
+        # )
 
         inside = d.unsqueeze(1) < self._success_thresholds.unsqueeze(0)   # (N, K)
         newly_crossed = inside & (~self._success_claimed)                 # (N, K)
@@ -934,7 +935,7 @@ class UavNavigationEnv(DirectRLEnv):
         rewards = {
             "lin_vel":                  lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel":                  ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
-            "distance_to_goal":         distance_to_goal_reward * self.step_dt,
+            "distance_to_goal":         distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
             "action_reg_diff":          action_reg_diff * self.cfg.rew_scale_action_reg * self.step_dt,
             "life":                     life,
             "distance_to_obstacles":    dist_to_obs_reward * self.cfg.distance_to_obstacles_reward_scale * self.step_dt,

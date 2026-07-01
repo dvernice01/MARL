@@ -194,9 +194,10 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     # goal_lambda3: float = 10.0
     # r4: progress / delta-distance reward, weight on (d_{t-1} - d_t)
     goal_progress_scale: float = 30.0
+    distance_to_goal_reward_scale: float = 35.0  # one-time per crossing; not multiplied by step_dt
 
     # ── Goal reaching / success ──────────────────────────────────────────
-    goal_radius: float = 2.5
+    goal_radius: float = 1.5
     exploration_stop: float = 1.0
 
     # ── Curriculum: expanding spawn box for drone and goal ───────────────
@@ -218,7 +219,7 @@ class UavNavigationEnvCfg(DirectRLEnvCfg):
     eval_fixed_spawn_xy: tuple | None = None
 
     goal_success_thresholds: tuple = (5.0, 4.0, 3.0, 2.0, 1.0)
-    goal_success_scale: float = 5.0     # one-time per crossing; not multiplied by step_dt
+    goal_success_scale: float = 0.0     # one-time per crossing; not multiplied by step_dt
     curriculum_near_radius: float = 2.5
     curriculum_near_levels: int = 2
 
