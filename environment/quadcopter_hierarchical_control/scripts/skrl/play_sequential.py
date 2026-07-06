@@ -4,7 +4,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-Script to play a checkpoint of an RL agent from skrl.
+Script to play a checkpoint of the Velocity Controller PPO agent (skrl) and
+optionally record a video.
 
 Visit the skrl documentation (https://skrl.readthedocs.io) to see the examples structured in
 a more user-friendly way.
@@ -18,43 +19,27 @@ import sys
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Play a checkpoint of an RL agent from skrl.")
-parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
+parser = argparse.ArgumentParser(description="Play a checkpoint of the Velocity Controller PPO agent.")
+parser.add_argument("--video", action="store_true", default=False, help="Record videos during play.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
-    "--agent",
-    type=str,
-    default=None,
-    help=(
-        "Name of the RL agent configuration entry point. Defaults to None, in which case the argument "
-        "--algorithm is used to determine the default agent configuration entry point."
-    ),
+    "--task", type=str, default="Template-Hierarchical-Controller-Direct-Play-v0", help="Name of the task."
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument(
-    "--use_pretrained_checkpoint",
-    action="store_true",
-    help="Use the pre-trained checkpoint from Nucleus.",
-)
-parser.add_argument(
-    "--ml_framework",
-    type=str,
-    default="torch",
-    choices=["torch", "jax", "jax-numpy"],
-    help="The ML framework used for training the skrl agent.",
-)
-parser.add_argument(
-    "--algorithm",
-    type=str,
-    default="PPO",
-    choices=["AMP", "PPO", "IPPO", "MAPPO"],
-    help="The RL algorithm used for training the skrl agent.",
+    "--hidden_size",
+    type=int,
+    default=None,
+    help=(
+        "hidden_size used to build VelocityControllerPolicy/Value at training time. "
+        "If not given, the script tries to auto-detect it from the run's "
+        "reproducibility/config.json (wandb_config.hidden_size). Falls back to 256."
+    ),
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 
@@ -74,6 +59,7 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import json
 import os
 import random
 import time
@@ -92,10 +78,10 @@ if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
     )
     exit()
 
-if args_cli.ml_framework.startswith("torch"):
-    from skrl.utils.runner.torch import Runner
-elif args_cli.ml_framework.startswith("jax"):
-    from skrl.utils.runner.jax import Runner
+from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
+from skrl.memories.torch import RandomMemory
+from skrl.resources.preprocessors.torch import RunningStandardScaler
+from skrl.resources.schedulers.torch import KLAdaptiveLR
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -113,45 +99,47 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-# IMPORTATE DA ME ------------------------------------------------
-from skrl.utils.model_instantiators.torch import gaussian_model, deterministic_model
-from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
-from skrl.memories.torch import RandomMemory
-from skrl.trainers.torch import SequentialTrainer
-from skrl.resources.schedulers.torch import KLAdaptiveLR
-from skrl.resources.preprocessors.torch import RunningStandardScaler
-from skrl.models.torch import DeterministicMixin, Model
-
-# ----------------------------------------------------------------
-import torch
-import torch.nn as nn
+# --- stessi modelli usati in training (agents/ppo_agent.py) ---
+from agents.ppo_agent import VelocityControllerPolicy, VelocityControllerValue
 
 import quadcopter_hierarchical_control.tasks  # noqa: F401
 
-# config shortcuts
-if args_cli.agent is None:
-    algorithm = args_cli.algorithm.lower()
-    agent_cfg_entry_point = "skrl_cfg_entry_point" if algorithm in ["ppo"] else f"skrl_{algorithm}_cfg_entry_point"
-else:
-    agent_cfg_entry_point = args_cli.agent
-    algorithm = agent_cfg_entry_point.split("_cfg")[0].split("skrl_")[-1].lower()
+
+agent_cfg_entry_point = "skrl_cfg_entry_point"
 
 
-class ValueNetwork(DeterministicMixin, Model):
-    def __init__(self, observation_space, action_space, device):
-        Model.__init__(self, observation_space, action_space, device)
-        DeterministicMixin.__init__(self, clip_actions=False)
-        
-        self.net = nn.Sequential(
-            nn.Linear(self.num_observations, 32),
-            nn.ELU(),
-            nn.Linear(32, 32),
-            nn.ELU(),
-            nn.Linear(32, 1)  # <-- output scalare
-        )
-    
-    def compute(self, inputs, role):
-        return self.net(inputs["states"]), {}
+def _find_hidden_size(resume_path: str, cli_value: int | None, default: int = 256) -> int:
+    """Cerca hidden_size in reproducibility/config.json risalendo dal checkpoint.
+
+    Struttura di training attesa:
+        runs/<sweep>/<run_name>/<timestamp>/checkpoints/agent_XXXX.pt
+        runs/<sweep>/<run_name>/reproducibility/config.json
+
+    Se non trova nulla, usa cli_value se fornito, altrimenti `default`.
+    """
+    if cli_value is not None:
+        print(f"[INFO] hidden_size forzato da CLI: {cli_value}")
+        return cli_value
+
+    current = os.path.abspath(resume_path)
+    for _ in range(6):  # risale al massimo 6 livelli di cartelle
+        current = os.path.dirname(current)
+        candidate = os.path.join(current, "reproducibility", "config.json")
+        if os.path.isfile(candidate):
+            try:
+                with open(candidate, "r") as f:
+                    data = json.load(f)
+                hs = data.get("wandb_config", {}).get("hidden_size", None)
+                if hs is not None:
+                    print(f"[INFO] hidden_size={hs} letto da {candidate}")
+                    return int(hs)
+                print(f"[WARNING] '{candidate}' trovato ma senza 'hidden_size' in wandb_config.")
+            except Exception as e:
+                print(f"[WARNING] Impossibile leggere {candidate}: {e}")
+            break  # trovato il file ma senza il dato utile: non serve continuare a risalire
+
+    print(f"[WARNING] Nessun config.json trovato per il checkpoint. Uso hidden_size di default={default}.")
+    return default
 
 
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
@@ -165,16 +153,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
-    # configure the ML framework into the global skrl variable
-    if args_cli.ml_framework.startswith("jax"):
-        skrl.config.jax.backend = "jax" if args_cli.ml_framework == "jax" else "numpy"
-
-        # randomly sample a seed if seed = -1
+    # randomly sample a seed if seed = -1
     if args_cli.seed == -1:
         args_cli.seed = random.randint(0, 10000)
 
     # set the agent and environment seed from command line
-    # note: certain randomization occur in the environment initialization so we set the seed here
     experiment_cfg["seed"] = args_cli.seed if args_cli.seed is not None else experiment_cfg["seed"]
     env_cfg.seed = experiment_cfg["seed"]
 
@@ -183,17 +166,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
     # get checkpoint path
-    if args_cli.use_pretrained_checkpoint:
-        resume_path = get_published_pretrained_checkpoint("skrl", train_task_name)
-        if not resume_path:
-            print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
-            return
-    elif args_cli.checkpoint:
+    if args_cli.checkpoint:
         resume_path = os.path.abspath(args_cli.checkpoint)
     else:
-        resume_path = get_checkpoint_path(
-            log_root_path, run_dir=f".*_{algorithm}_{args_cli.ml_framework}", other_dirs=["checkpoints"]
-        )
+        resume_path = get_checkpoint_path(log_root_path, other_dirs=["checkpoints"])
     log_dir = os.path.dirname(os.path.dirname(resume_path))
 
     # set the log directory for the environment (works for all environment types)
@@ -203,7 +179,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
     # convert to single-agent instance if required by the RL algorithm
-    if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:
+    if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
 
     # get environment (step) dt for real-time evaluation
@@ -220,44 +196,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
             "video_length": args_cli.video_length,
             "disable_logger": True,
         }
-        print("[INFO] Recording videos during training.")
+        print("[INFO] Recording videos during play.")
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
     # wrap around environment for skrl
-    env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)  # same as: `wrap_env(env, wrapper="auto")`
+    env = SkrlVecEnvWrapper(env, ml_framework="torch")  # same as: `wrap_env(env, wrapper="auto")`
 
-    # configure and instantiate the skrl runner
-    # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
-    experiment_cfg["trainer"]["close_environment_at_exit"] = False
-    experiment_cfg["agent"]["experiment"]["write_interval"] = 0  # don't log to TensorBoard
-    experiment_cfg["agent"]["experiment"]["checkpoint_interval"] = 0  # don't generate checkpoints
-    
     obs_space = env.observation_space
     act_space = env.action_space
+    device = env_cfg.sim.device
 
-    # --- MODELLI ---
-    models = {}
-    models["policy"] = gaussian_model(
-        observation_space=obs_space,
-        action_space=act_space,
-        device=env_cfg.sim.device,
-        cfg=experiment_cfg["models"]["policy"]  # <-- era agent_cfg_entry_point
-    )
-    models["value"] = ValueNetwork(
-        observation_space=obs_space,
-        action_space=act_space,
-        device=env_cfg.sim.device,
-    )
+    # --- hidden_size: deve combaciare con il training ---
+    hidden_size = _find_hidden_size(resume_path, args_cli.hidden_size, default=256)
 
-    # --- MEMORIA ---
+    # --- MODELLI (identici a agents/ppo_agent.py) ---
+    models = {
+        "policy": VelocityControllerPolicy(obs_space, act_space, device, hidden_size=hidden_size),
+        "value": VelocityControllerValue(obs_space, act_space, device, hidden_size=hidden_size),
+    }
+
+    # --- MEMORIA (serve solo per instanziare l'agente, non usata in play) ---
     memory = RandomMemory(
-        memory_size=experiment_cfg["agent"]["rollouts"],  # <-- era agent_cfg_entry_point
+        memory_size=experiment_cfg["agent"]["rollouts"],
         num_envs=env.num_envs,
-        device=env_cfg.sim.device
+        device=device,
     )
 
-    # --- CFG PPO ---
+    # --- CFG PPO (deve combaciare per via degli stati dei preprocessor salvati nel checkpoint) ---
     cfg_ppo = PPO_DEFAULT_CONFIG.copy()
     cfg_ppo.update({
         "rollouts": experiment_cfg["agent"]["rollouts"],
@@ -269,9 +235,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         "learning_rate_scheduler": KLAdaptiveLR,
         "learning_rate_scheduler_kwargs": experiment_cfg["agent"]["learning_rate_scheduler_kwargs"],
         "state_preprocessor": RunningStandardScaler,
-        "state_preprocessor_kwargs": {"size": obs_space, "device": env_cfg.sim.device},
+        "state_preprocessor_kwargs": {"size": obs_space, "device": device},
         "value_preprocessor": RunningStandardScaler,
-        "value_preprocessor_kwargs": {"size": 1, "device": env_cfg.sim.device},
+        "value_preprocessor_kwargs": {"size": 1, "device": device},
         "grad_norm_clip": experiment_cfg["agent"]["grad_norm_clip"],
         "ratio_clip": experiment_cfg["agent"]["ratio_clip"],
         "value_clip": experiment_cfg["agent"]["value_clip"],
@@ -279,8 +245,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         "entropy_loss_scale": experiment_cfg["agent"]["entropy_loss_scale"],
         "value_loss_scale": experiment_cfg["agent"]["value_loss_scale"],
         "experiment": {
-            "write_interval": 0,       # <-- no logging in play
-            "checkpoint_interval": 0,  # <-- no checkpoint in play
+            "write_interval": 0,  # non loggare in play
+            "checkpoint_interval": 0,  # non salvare checkpoint in play
             "directory": "",
         },
     })
@@ -292,21 +258,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         cfg=cfg_ppo,
         observation_space=obs_space,
         action_space=act_space,
-        device=env_cfg.sim.device
+        device=device,
     )
     agent.init()
 
-    # --- TRAINER ---
-    trainer = SequentialTrainer(
-        env=env,
-        agents=agent,
-        cfg={"timesteps": 1000, "headless": False}
-    )
-
     # --- CARICA CHECKPOINT ---
     print(f"[INFO] Loading model checkpoint from: {resume_path}")
-    trainer.agents.load(resume_path)  # <-- era trainer.agent (senza s)
-    trainer.agents.set_running_mode("eval")
+    agent.load(resume_path)
+    agent.set_running_mode("eval")
 
     # --- LOOP DI PLAY ---
     obs, _ = env.reset()
@@ -316,7 +275,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         start_time = time.time()
 
         with torch.inference_mode():
-            outputs = trainer.agents.act(obs, timestep=0, timesteps=0)  # <-- era runner.agent
+            outputs = agent.act(obs, timestep=0, timesteps=0)
             actions = outputs[-1].get("mean_actions", outputs[0])
             obs, _, _, _, _ = env.step(actions)
 
@@ -330,6 +289,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
             time.sleep(sleep_time)
 
     env.close()
+
 
 if __name__ == "__main__":
     # run the main function
