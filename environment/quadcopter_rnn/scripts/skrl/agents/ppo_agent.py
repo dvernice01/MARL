@@ -86,7 +86,7 @@ DEFAULT_PPO_CONFIG = {
         "checkpoint_interval": 10000,
         "wandb": True,
         "wandb_kwargs": {
-            "project": "quadcopter_hierarchical_control",  # Must be a string
+            "project": "quadcopter_rnn",  # Must be a string
         }
     }
 }

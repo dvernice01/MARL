@@ -1,0 +1,10 @@
+pyproject.toml
+setup.py
+QuadcopterVae/__init__.py
+QuadcopterVae/ui_extension_example.py
+QuadcopterVae.egg-info/PKG-INFO
+QuadcopterVae.egg-info/SOURCES.txt
+QuadcopterVae.egg-info/dependency_links.txt
+QuadcopterVae.egg-info/not-zip-safe
+QuadcopterVae.egg-info/requires.txt
+QuadcopterVae.egg-info/top_level.txt

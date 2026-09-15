@@ -18,18 +18,20 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import subtract_frame_transforms
-
+from isaaclab.sensors import CameraCfg, RayCasterCfg, patterns
 ##
 # Pre-defined configs
 ##
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+
 
 
 class QuadcopterEnvWindow(BaseEnvWindow):
     """Window manager for the Quadcopter environment."""
 
-    def __init__(self, env: QuadcopterHierarchicalControlEnv, window_name: str = "IsaacLab"):
+    def __init__(self, env: QuadcopterRnnEnv, window_name: str = "IsaacLab"):
         """Initialize the window.
 
         Args:
@@ -47,9 +49,9 @@ class QuadcopterEnvWindow(BaseEnvWindow):
 
 
 @configclass
-class QuadcopterHierarchicalControlEnvCfg(DirectRLEnvCfg):
+class QuadcopterRnnEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 20.0
+    episode_length_s = 200.0
     decimation= 10
     decimation_low_level = 2
     action_space = 4
@@ -74,10 +76,12 @@ class QuadcopterHierarchicalControlEnvCfg(DirectRLEnvCfg):
             restitution=0.0,
         ),
     )
-    terrain = TerrainImporterCfg(
+
+    terrain: TerrainImporterCfg = TerrainImporterCfg(
         prim_path="/World/ground",
-        terrain_type="plane",
-        collision_group=-1,
+        terrain_type="usd",
+        usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/full_warehouse.usd",
+        collision_group=1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -88,22 +92,49 @@ class QuadcopterHierarchicalControlEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
 
+    # terrain = TerrainImporterCfg(
+    #     prim_path="/World/ground",
+    #     terrain_type="plane",
+    #     collision_group=-1,
+    #     physics_material=sim_utils.RigidBodyMaterialCfg(
+    #         friction_combine_mode="multiply",
+    #         restitution_combine_mode="multiply",
+    #         static_friction=1.0,
+    #         dynamic_friction=1.0,
+    #         restitution=0.0,
+    #     ),
+    #     debug_vis=False,
+    # )
+
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=4096, env_spacing=2.5, replicate_physics=True, clone_in_fabric=True
+        num_envs=3, env_spacing=2.5, replicate_physics=True
     )
 
     # robot
-    robot: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot: ArticulationCfg = CRAZYFLIE_CFG.replace(
+        prim_path="/World/envs/env_.*/Robot",
+    )
     thrust_to_weight = 1.9
     moment_scale = 0.01
 
+    # height_scanner = RayCasterCfg(
+    #     prim_path="/World/envs/env_.*/Robot/body",
+    #     update_period=1 / 60,
+    #     offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 5.0)),
+    #     ray_alignment="yaw",
+    #     #pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
+    #     debug_vis=True,
+    #     mesh_prim_paths=["/World/ground"],
+    #     pattern_cfg=patterns.LidarPatternCfg(
+    #         channels=100, vertical_fov_range=[-90, 90], horizontal_fov_range=[-90, 90], horizontal_res=1.0
+    #     ),
+    # )
 
-    # /home/studenti/dvernice/Marl_IsaacLab/environment/quadcopter_hierarchical_control/runs/manual_run/cosmic-smoke-232/26-05-18_14-18-46-704539_PPO/checkpoints/best_agent.pt
-    # reward scales1
-    lin_vel_reward_scale = 0.1
-    ang_vel_reward_scale = 0.1
-    distance_to_goal_reward_scale = 25.0
+    # reward scales
+    lin_vel_reward_scale = -1.0
+    ang_vel_reward_scale = -1.0
+    distance_to_goal_reward_scale = 100.0
     rew_scale_action_reg = 0.1
     alive_reward_scale = 0.1
-    death_reward_scale = -5.0
+    death_reward_scale = 0.0

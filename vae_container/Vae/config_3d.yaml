@@ -1,0 +1,27 @@
+program: training_3D_autoencoder.py
+method: grid
+name: 3d_ae_sweep_v3_svs_push
+metric:
+  goal: maximize
+  name: val/svs_iou
+parameters:
+  # ── fixed (locked in from v1+v2) ────────────────────────────
+  batch_size:         {value: 64}
+  epochs:             {value: 100}
+  lr:                 {value: 0.0001}
+  num_conv_layers:    {value: 6}
+  num_deconv_layers:  {value: 5}
+  weight_decay:       {value: 0.0001}
+  use_residual:       {value: true}
+  residual_every:     {value: 2}
+  use_skip:           {value: true}
+  occ_weight:         {value: 1.0}
+  occ_pos_weight:     {value: 6}              # +1.8 IoU vs 12 in v2
+  svs_nonzero_weight: {values: [100, 120]} # 35            # beats 50 (50 smears)
+  # ── swept ───────────────────────────────────────────────────
+  latent_dim:         {value: 192}
+  svs_weight:         {values: [20.0, 30.0]} # 4
+  occ_dice_weight:    {values: [0.5, 1.0, 3.0]}
+  svs_dice_weight:    {values: [1.0, 3.0, 5.0]}
+
+

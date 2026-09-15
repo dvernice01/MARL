@@ -1,0 +1,43 @@
+  # config.yaml
+  program: training_offline_sweep.py
+  method: random
+  name: sweep
+  metric:
+    goal: minimize
+    name: val/recon_loss
+
+  # parameters:
+  #   latent_dim:
+  #     values: [128, 256]
+  #   num_conv_layers:
+  #     values: [5, 6]
+  #   use_residual:
+  #     values: [True, False]
+  #   use_skip:
+  #     values: [True]
+  #   beta_max:
+  #     values: [0.1, 1, 10]
+  #   num_deconv_layers:
+  #     values: [5, 7]
+  #   residual_every:
+  #     values: [2]
+  #   lr:
+  #     values: [1e-4]
+
+  parameters:
+    latent_dim:
+      values: [512]
+    num_conv_layers:
+      values: [6]
+    use_residual:
+      values: [True]
+    use_skip:
+      values: [True]
+    beta_max:
+      values: [0.1]
+    num_deconv_layers:
+      values: [7]
+    residual_every:
+      values: [2]
+    lr:
+      values: [1e-4]

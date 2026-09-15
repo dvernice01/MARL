@@ -28,7 +28,7 @@ parser.add_argument("--video", action="store_true", default=False, help="Record 
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default="Template-Hierarchical-Controller-Direct-v0", help="Name of the task.")
+parser.add_argument("--task", type=str, default="Template-Uav-Navigation-Direct-v0", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=42, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint to resume training.")
@@ -67,7 +67,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_rl.skrl import SkrlVecEnvWrapper
 from isaaclab.utils.io import dump_yaml
 
-import quadcopter_hierarchical_control.tasks.direct.quadcopter_hierarchical_control  # noqa: F401
+import uav_navigation.tasks.direct.uav_navigation # noqa: F401
 
 
 # config shortcuts
@@ -117,8 +117,8 @@ def save_reproducibility_info(log_dir, agent, args_cli, env_cfg):
         # Agent Factory (Dynamically copy based on active agent?)
         # For now we copy the one used.
         # Env
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../source/quadcopter_hierarchical_control/quadcopter_hierarchical_control/tasks/direct/quadcopter_hierarchical_control/quadcopter_hierarchical_control_env.py")),
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../source/quadcopter_hierarchical_control/quadcopter_hierarchical_control/tasks/direct/quadcopter_hierarchical_control/quadcopter_hierarchical_control_env_cfg.py")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../source/uav_navigation/uav_navigation/tasks/direct/uav_navigation/uav_navigation_env.py")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../source/uav_navigation/uav_navigation/tasks/direct/uav_navigation/uav_navigation_env_cfg.py")),
     ]
     
     # Add Agent Config File
@@ -133,13 +133,14 @@ def save_reproducibility_info(log_dir, agent, args_cli, env_cfg):
 
     print(f"[INFO] Reproducibility info saved to: {repro_dir}")
 
+
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(env_cfg, agent_cfg: dict):
 
     # ── 1. Init wandb FIRST so sweep config is available ──────────────
     run = wandb.init(
-        project="quadcopter_hierarchical_control",
         sync_tensorboard=True,
+        project="uav_navigation",
     )
     sweep_cfg = wandb.config  # sweep controller injects values here
 
@@ -160,19 +161,15 @@ def main(env_cfg, agent_cfg: dict):
     # ── 3. Apply env/sim overrides ─────────────────────────────────────
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device     = args_cli.device   if args_cli.device   is not None else env_cfg.sim.device
+    if args_cli.seed == -1:
+        import random
+        args_cli.seed = random.randint(0, 10000)
     env_cfg.seed           = args_cli.seed      if args_cli.seed     is not None else env_cfg.seed
 
-# Replace the log_dir and experiment_name section (lines 165-168) with:
-
-    # ── Log directory: runs/<sweep_id>/<run_name>/ ────────────────────────
-    sweep_name = wandb.run.sweep_id or "manual_run"
-    run_name = wandb.run.name or wandb.run.id
-    run_dir = os.path.join("runs", sweep_name, run_name)
-    os.makedirs(run_dir, exist_ok=True)
-
-    print(f"[INFO] Run dir: {run_dir}")
-    print(f"[INFO] Config: {dict(sweep_cfg)}")
-
+    experiment_name = args_cli.experiment_name if args_cli.experiment_name \
+        else datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_Manual_{args_cli.agent.upper()}"
+    log_dir = os.path.join("projects", "uav_navigation", "logs", "skrl",
+                           "uav_navigation_direct", experiment_name)
 
     # ── 4. Create environment ──────────────────────────────────────────
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -197,73 +194,36 @@ def main(env_cfg, agent_cfg: dict):
     agent = agent_factory(
         env=env,
         device=device,
-        agent_cfg=sweep_cfg,
-        log_dir=run_dir
+        agent_cfg=sweep_cfg,   # ← sweep config flows in here
+        log_dir=log_dir
     )
-
-        # ── Save reproducibility info ─────────────────────────────────────────
-    repro_dir = os.path.join(run_dir, "reproducibility")
-    os.makedirs(repro_dir, exist_ok=True)
-
-    # Save full config
-    import json
-    repro_data = {
-        "timestamp": datetime.now().isoformat(),
-        "seed": args_cli.seed,
-        "num_envs": env_cfg.scene.num_envs,
-        "task": args_cli.task,
-        "agent": args_cli.agent,
-        "sweep_id": sweep_name,
-        "run_name": run_name,
-        "wandb_config": dict(sweep_cfg),
-        "env_cfg_rewards": {
-            "lin_vel_reward_scale": env_cfg.lin_vel_reward_scale,
-            "ang_vel_reward_scale": env_cfg.ang_vel_reward_scale,
-            "distance_to_goal_reward_scale": env_cfg.distance_to_goal_reward_scale,
-            "alive_reward_scale": env_cfg.alive_reward_scale,
-            "death_reward_scale": env_cfg.death_reward_scale,
-            "rew_scale_action_reg": env_cfg.rew_scale_action_reg,
-        },
-        "packages": {
-            "skrl": skrl.__version__,
-            "torch": torch.__version__,
-        },
-    }
-    with open(os.path.join(repro_dir, "config.json"), "w") as f:
-        json.dump(repro_data, f, indent=4, default=str)
-
-    # Save model architecture
-    with open(os.path.join(repro_dir, "model_architecture.txt"), "w") as f:
-        f.write("Policy Network:\n")
-        f.write(str(agent.policy) + "\n\n")
-        f.write("Value Network:\n")
-        f.write(str(agent.value) + "\n")
-
-    # Copy source files
-    source_dir = os.path.join(repro_dir, "source_code")
-    os.makedirs(source_dir, exist_ok=True)
-    for src in [
-        os.path.abspath(__file__),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents", "ppo_agent.py"),
-    ]:
-        if os.path.exists(src):
-            shutil.copy2(src, source_dir)
-
-    print(f"[INFO] Reproducibility info saved to: {repro_dir}")
-
-
 
     # ── 6. Trainer ────────────────────────────────────────────────────
     rollouts = sweep_cfg.get("rollouts", 64)
-    default_timesteps = 50000
+    default_timesteps = 2000000
     trainer_cfg = {
         "timesteps": args_cli.max_iterations * rollouts if args_cli.max_iterations else default_timesteps,
         "headless": True,
         "close_environment_at_exit": False,
         "environment_info": "log",
     }
+    import torch
+    print(f"PyTorch alloc:    {torch.cuda.memory_allocated()/1e9:.2f} GB")
+    print(f"PyTorch reserved: {torch.cuda.memory_reserved()/1e9:.2f} GB")
+    import subprocess
+    out = subprocess.run(["nvidia-smi","--query-gpu=memory.used","--format=csv,noheader,nounits"], capture_output=True, text=True).stdout
+    print(f"GPU total used:   {int(out.strip())/1024:.2f} GB")
+
     trainer = SequentialTrainer(cfg=trainer_cfg, env=env, agents=agent)
+
+    # resume from a checkpoint if provided
+    if args_cli.checkpoint:
+        resume_path = os.path.abspath(args_cli.checkpoint)
+        print(f"[INFO] Resuming training from checkpoint: {resume_path}")
+        agent.load(resume_path)
+
     trainer.train()
+
     env.close()
 
 if __name__ == "__main__":
